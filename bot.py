@@ -11,7 +11,7 @@ from aiogram.enums import ParseMode
 import asyncio
 
 # Импорт вашего парсера
-from scrap import SimpleSportboxScraper
+from scrap import SportboxDatabaseScraper
 from scrap import main as scrap_main
 
 # Настройка логирования
@@ -31,7 +31,7 @@ class UserStates(StatesGroup):
 class FootballNewsBot:
     def __init__(self, token: str):
         self.token = token
-        self.scraper = SimpleSportboxScraper()
+        self.scraper = SportboxDatabaseScraper()
         self.news_data = []
         self.current_news_index = {}
         self.is_parsing = False  # Флаг для отслеживания парсинга

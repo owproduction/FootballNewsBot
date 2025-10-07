@@ -7,110 +7,46 @@ import os
 from datetime import datetime
 import random
 import sqlite3
-from contextlib import contextmanager
+from typing import List, Dict
 
-class SportboxDatabaseScraper:
-    def __init__(self, db_path='sportbox_news.db'):
+class SimpleSportboxScraper:
+    def __init__(self, db_path: str = "football_news.db"):
+        self.news_data = []
         self.db_path = db_path
+        os.makedirs('sportbox_news', exist_ok=True)
         self.init_database()
         
-    @contextmanager
-    def get_db_connection(self):
-        """Контекстный менеджер для работы с БД"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            conn.close()
-    
     def init_database(self):
-        """Инициализация базы данных и создание таблиц"""
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Создаем таблицу новостей
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS news (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    link TEXT UNIQUE NOT NULL,
-                    rubric TEXT,
-                    date TEXT,
-                    image_url TEXT,
-                    content TEXT,
-                    scraped_at DATETIME NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Создаем индекс для быстрого поиска по ссылкам
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_link ON news(link)
-            ''')
-            
-            # Создаем индекс для поиска по дате
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_scraped_at ON news(scraped_at)
-            ''')
-    
-    def news_exists(self, link):
-        """Проверяем, существует ли новость в БД"""
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT id FROM news WHERE link = ?', (link,))
-            return cursor.fetchone() is not None
-    
-    def save_news_to_db(self, news_items):
-        """Сохраняем новости в базу данных"""
-        new_count = 0
-        updated_count = 0
+        """Инициализация базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            for item in news_items:
-                if not item['link']:
-                    continue
-                
-                # Проверяем существование новости
-                if self.news_exists(item['link']):
-                    # Обновляем существующую запись
-                    cursor.execute('''
-                        UPDATE news 
-                        SET title = ?, rubric = ?, date = ?, image_url = ?, scraped_at = ?
-                        WHERE link = ?
-                    ''', (
-                        item['title'],
-                        item['rubric'],
-                        item['date'],
-                        item['image_url'],
-                        item['scraped_at'],
-                        item['link']
-                    ))
-                    if cursor.rowcount > 0:
-                        updated_count += 1
-                else:
-                    # Вставляем новую запись
-                    cursor.execute('''
-                        INSERT INTO news (title, link, rubric, date, image_url, scraped_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (
-                        item['title'],
-                        item['link'],
-                        item['rubric'],
-                        item['date'],
-                        item['image_url'],
-                        item['scraped_at']
-                    ))
-                    new_count += 1
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS news (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                link TEXT UNIQUE,
+                rubric TEXT,
+                date TEXT,
+                image_url TEXT,
+                scraped_at TEXT,
+                club_tags TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
-        return new_count, updated_count
-    
+        # Создаем индекс для быстрого поиска по заголовку и тегам
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_title ON news(title)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_club_tags ON news(club_tags)
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print(f"База данных инициализирована: {self.db_path}")
+        
     def get_page_content(self, url):
         """Получаем контент страницы"""
         headers = {
@@ -127,6 +63,33 @@ class SportboxDatabaseScraper:
             print(f"Ошибка загрузки страницы: {e}")
             return None
 
+    def extract_club_tags(self, title: str) -> str:
+        """Извлекает теги клубов из заголовка"""
+        clubs = {
+            'Реал Мадрид': ['реал', 'мадрид', 'real madrid'],
+            'Барселона': ['барселона', 'barcelona', 'барса'],
+            'Манчестер Юнайтед': ['манчестер юнайтед', 'manchester united', 'ман юнайтед'],
+            'Челси': ['челси', 'chelsea'],
+            'Бавария': ['бавария', 'bayern', 'бавария мюнхен'],
+            'Ювентус': ['ювентус', 'juventus'],
+            'Ливерпуль': ['ливерпуль', 'liverpool'],
+            'Арсенал': ['арсенал', 'arsenal'],
+            'Манчестер Сити': ['манчестер сити', 'manchester city'],
+            'Милан': ['милан', 'milan'],
+            'Интер': ['интер', 'inter'],
+            'ПСЖ': ['псж', 'psg', 'пари сен-жермен'],
+            'Боруссия Дортмунд': ['боруссия', 'dortmund', 'дортмунд']
+        }
+        
+        found_clubs = []
+        title_lower = title.lower()
+        
+        for club, keywords in clubs.items():
+            if any(keyword in title_lower for keyword in keywords):
+                found_clubs.append(club)
+                
+        return ', '.join(found_clubs) if found_clubs else ''
+
     def parse_news(self, html_content):
         """Парсим новости"""
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -134,13 +97,12 @@ class SportboxDatabaseScraper:
         
         # Ищем новости в разных возможных контейнерах
         selectors = [
+            '#teazers ul.list li',
+            '.teaser-list .teaser-item',
+            '.news-list .news-item',
+            '.b-news-list .b-news-item',
             '.news-item',
-            '.teaser-item',
-            '.b-news-list li',
-            '.b-teasers-list li',
-            '.item-news',
-            '[class*="news"]',
-            '[class*="teaser"]'
+            '.teaser-item'
         ]
         
         for selector in selectors:
@@ -149,26 +111,9 @@ class SportboxDatabaseScraper:
                 print(f"Найдено элементов по селектору {selector}: {len(elements)}")
                 for element in elements:
                     news_item = self.extract_news_data(element)
-                    if news_item and news_item['title'] and len(news_item['title']) > 10:
+                    if news_item and news_item['title']:
                         news_items.append(news_item)
                 break
-        
-        # Если не нашли стандартными селекторами, ищем по структуре
-        if not news_items:
-            print("Поиск по альтернативным селекторам...")
-            # Ищем любые ссылки с заголовками
-            links = soup.find_all('a', href=True)
-            for link in links:
-                if len(link.get_text(strip=True)) > 20 and '/news/' in link['href']:
-                    news_item = {
-                        'title': link.get_text(strip=True),
-                        'link': 'https://news.sportbox.ru' + link['href'] if not link['href'].startswith('http') else link['href'],
-                        'rubric': '',
-                        'date': '',
-                        'image_url': '',
-                        'scraped_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    news_items.append(news_item)
         
         return news_items
 
@@ -176,7 +121,7 @@ class SportboxDatabaseScraper:
         """Извлекаем данные новости"""
         try:
             # Заголовок
-            title_elem = element.select_one('.title .text, .teaser-title, .news-title, .b-teaser__title, .b-news__title')
+            title_elem = element.select_one('.title .text, .teaser-title, .news-title, .b-news-title, .title')
             title = title_elem.get_text(strip=True) if title_elem else ""
             
             # Ссылка
@@ -186,11 +131,11 @@ class SportboxDatabaseScraper:
                 link = 'https://news.sportbox.ru' + link
             
             # Рубрика
-            rubric_elem = element.select_one('.rubric, .teaser-rubric, .news-rubric, .b-teaser__rubric, .b-news__rubric')
+            rubric_elem = element.select_one('.rubric, .teaser-rubric, .news-rubric, .b-news-rubric')
             rubric = rubric_elem.get_text(strip=True) if rubric_elem else ""
             
             # Дата
-            date_elem = element.select_one('.date, .teaser-date, .news-date, .b-teaser__date, .b-news__date')
+            date_elem = element.select_one('.date, .teaser-date, .news-date, .b-news-date')
             date = date_elem.get_text(strip=True) if date_elem else ""
             
             # Изображение
@@ -199,18 +144,113 @@ class SportboxDatabaseScraper:
             if image_url and not image_url.startswith('http'):
                 image_url = 'https:' + image_url
             
+            # Извлекаем теги клубов
+            club_tags = self.extract_club_tags(title)
+            
             return {
                 'title': title,
                 'link': link,
                 'rubric': rubric,
                 'date': date,
                 'image_url': image_url,
+                'club_tags': club_tags,
                 'scraped_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
         except Exception as e:
             print(f"Ошибка извлечения: {e}")
             return None
+
+    def save_to_database(self, news_items: List[Dict]):
+        """Сохраняет новости в базу данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        saved_count = 0
+        for item in news_items:
+            try:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO news 
+                    (title, link, rubric, date, image_url, scraped_at, club_tags)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    item['title'],
+                    item['link'],
+                    item['rubric'],
+                    item['date'],
+                    item['image_url'],
+                    item['scraped_at'],
+                    item.get('club_tags', '')
+                ))
+                saved_count += 1
+            except sqlite3.IntegrityError:
+                # Пропускаем дубликаты (UNIQUE constraint on link)
+                continue
+            except Exception as e:
+                print(f"Ошибка сохранения новости в БД: {e}")
+        
+        conn.commit()
+        conn.close()
+        print(f"Сохранено новых новостей в БД: {saved_count}")
+        
+    def get_news_from_db(self, limit: int = 100, club: str = None):
+        """Получает новости из базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if club:
+            cursor.execute('''
+                SELECT * FROM news 
+                WHERE club_tags LIKE ? 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ''', (f'%{club}%', limit))
+        else:
+            cursor.execute('''
+                SELECT * FROM news 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ''', (limit,))
+        
+        news_items = []
+        columns = [column[0] for column in cursor.description]
+        
+        for row in cursor.fetchall():
+            news_item = dict(zip(columns, row))
+            news_items.append(news_item)
+        
+        conn.close()
+        return news_items
+    
+    def get_all_clubs(self):
+        """Получает список всех клубов из базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT club_tags FROM news 
+            WHERE club_tags != '' 
+            AND club_tags IS NOT NULL
+        ''')
+        
+        clubs = set()
+        for row in cursor.fetchall():
+            club_list = row[0].split(', ')
+            clubs.update(club_list)
+        
+        conn.close()
+        return sorted(list(clubs))
+    
+    def get_news_count(self):
+        """Получает общее количество новостей в базе"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM news')
+        count = cursor.fetchone()[0]
+        
+        conn.close()
+        return count
 
     def scrape(self, url, pages=3):
         """Основная функция парсинга"""
@@ -233,134 +273,61 @@ class SportboxDatabaseScraper:
             if page < pages:
                 time.sleep(random.uniform(2, 4))
         
-        # Сохраняем в БД
+        # Сохраняем в базу данных
         if all_news:
-            new_count, updated_count = self.save_news_to_db(all_news)
-            print(f"Добавлено новых: {new_count}, обновлено: {updated_count}")
+            self.save_to_database(all_news)
         
         return all_news
 
-    def export_to_files(self, format_type='both'):
-        """Экспорт данных из БД в файлы"""
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT title, link, rubric, date, image_url, scraped_at 
-                FROM news 
-                ORDER BY scraped_at DESC
-            ''')
-            news = [dict(row) for row in cursor.fetchall()]
-        
-        if not news:
-            print("Нет данных для экспорта")
-            return
-        
+    def save_data(self, data):
+        """Сохраняем данные в файлы и базу данных"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        if format_type in ['json', 'both']:
-            # JSON
-            with open(f'sportbox_news_export_{timestamp}.json', 'w', encoding='utf-8') as f:
-                json.dump(news, f, ensure_ascii=False, indent=2)
-            print(f"JSON экспорт создан: sportbox_news_export_{timestamp}.json")
+        # JSON
+        with open(f'sportbox_news/sportbox_{timestamp}.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
         
-        if format_type in ['csv', 'both']:
-            # CSV
-            with open(f'sportbox_news_export_{timestamp}.csv', 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=news[0].keys())
+        # CSV
+        if data:
+            with open(f'sportbox_news/sportbox_{timestamp}.csv', 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=data[0].keys())
                 writer.writeheader()
-                writer.writerows(news)
-            print(f"CSV экспорт создан: sportbox_news_export_{timestamp}.csv")
-
-    def get_statistics(self):
-        """Получаем статистику по базе данных"""
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Общее количество новостей
-            cursor.execute('SELECT COUNT(*) FROM news')
-            total_count = cursor.fetchone()[0]
-            
-            # Количество новостей по рубрикам
-            cursor.execute('''
-                SELECT rubric, COUNT(*) as count 
-                FROM news 
-                WHERE rubric IS NOT NULL AND rubric != '' 
-                GROUP BY rubric 
-                ORDER BY count DESC
-            ''')
-            rubric_stats = cursor.fetchall()
-            
-            # Последняя дата обновления
-            cursor.execute('SELECT MAX(scraped_at) FROM news')
-            last_update = cursor.fetchone()[0]
-            
-        return {
-            'total_news': total_count,
-            'rubric_stats': dict(rubric_stats),
-            'last_update': last_update
-        }
-
-    def get_news_by_rubric(self, rubric, limit=10):
-        """Получаем новости по рубрике"""
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT title, link, rubric, date, image_url, scraped_at 
-                FROM news 
-                WHERE rubric = ? 
-                ORDER BY scraped_at DESC 
-                LIMIT ?
-            ''', (rubric, limit))
-            return [dict(row) for row in cursor.fetchall()]
-
-    def search_news(self, search_term, limit=10):
-        """Поиск новостей по заголовку"""
-        with self.get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT title, link, rubric, date, image_url, scraped_at 
-                FROM news 
-                WHERE title LIKE ? 
-                ORDER BY scraped_at DESC 
-                LIMIT ?
-            ''', (f'%{search_term}%', limit))
-            return [dict(row) for row in cursor.fetchall()]
+                writer.writerows(data)
+        
+        print(f"Данные сохранены в sportbox_news/sportbox_{timestamp}.[json|csv]")
+        print(f"Всего новостей в базе данных: {self.get_news_count()}")
 
 def main():
-    # Создаем экземпляр парсера
-    scraper = SportboxDatabaseScraper()
-    
-    # URL для парсинга
+    scraper = SimpleSportboxScraper()
     url = "https://news.sportbox.ru/Vidy_sporta/Futbol/Liga_Chempionov"
     
-    # Запускаем парсинг
-    print("Запуск парсинга...")
     news = scraper.scrape(url, pages=3)
     
-    # Показываем статистику
-    stats = scraper.get_statistics()
-    print(f"\n=== СТАТИСТИКА ===")
-    print(f"Всего новостей в базе: {stats['total_news']}")
-    print(f"Распределение по рубрикам: {stats['rubric_stats']}")
-    print(f"Последнее обновление: {stats['last_update']}")
-    
-    # Экспортируем данные
-    print("\nЭкспорт данных...")
-    scraper.export_to_files('both')
-    
-    # Показываем последние новости
-    print(f"\n=== ПОСЛЕДНИЕ НОВОСТИ ===")
-    with scraper.get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT title, rubric, date, scraped_at 
-            FROM news 
-            ORDER BY scraped_at DESC 
-            LIMIT 5
-        ''')
-        for i, row in enumerate(cursor.fetchall(), 1):
-            print(f"{i}. {row['title']}")
-            print(f"   Рубрика: {row['rubric']}, Дата: {row['date']}")
+    if news:
+        scraper.save_data(news)
+        print(f"Успешно собрано {len(news)} новостей!")
+        
+        # Показываем первые 5 новостей
+        for i, item in enumerate(news[:5]):
+            print(f"\n{i+1}. {item['title']}")
+            print(f"   Рубрика: {item['rubric']}")
+            print(f"   Дата: {item['date']}")
+            print(f"   Клубы: {item.get('club_tags', 'Не указаны')}")
+        
+        # Показываем доступные клубы
+        clubs = scraper.get_all_clubs()
+        print(f"\nДоступные клубы в базе: {', '.join(clubs)}")
+        
+        # Тестируем получение новостей по клубу
+        if clubs:
+            test_club = clubs[0]
+            club_news = scraper.get_news_from_db(limit=3, club=test_club)
+            print(f"\nПоследние новости по {test_club}:")
+            for i, item in enumerate(club_news):
+                print(f"  {i+1}. {item['title']}")
+                
+    else:
+        print("Не удалось собрать новости")
 
 if __name__ == "__main__":
     main()
