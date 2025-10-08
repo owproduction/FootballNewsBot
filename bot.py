@@ -1,18 +1,9 @@
-import os
-import json
 import logging
-from datetime import datetime
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.enums import ParseMode
-import asyncio
-
-# Импорт вашего парсера
-from scrap import SportboxDatabaseScraper
-from scrap import main as scrap_main
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import sqlite3
+from typing import List, Dict
+import os
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,391 +12,363 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Состояния FSM
-class UserStates(StatesGroup):
-    main_menu = State()
-    viewing_news = State()
-    viewing_club_news = State()
-    selecting_club = State()
-
 class FootballNewsBot:
-    def __init__(self, token: str):
+    def __init__(self, token: str, db_path: str = "football_news.db"):
         self.token = token
-        self.scraper = SportboxDatabaseScraper()
-        self.news_data = []
-        self.current_news_index = {}
-        self.is_parsing = False  # Флаг для отслеживания парсинга
+        self.db_path = db_path
+        self.application = Application.builder().token(token).build()
         
-        # Инициализация aiogram
-        self.bot = Bot(token=token)
-        self.dp = Dispatcher()
-        self.router = Router()
-        self.dp.include_router(self.router)
+        # Добавляем обработчики
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("news", self.show_news_categories))
+        self.application.add_handler(CallbackQueryHandler(self.button_handler))
         
-        # Регистрация обработчиков
-        self.register_handlers()
-
-    def register_handlers(self):
-        """Регистрация всех обработчиков"""
-        # Команда /start
-        self.router.message.register(self.start_handler, Command("start"))
-        
-        # Главное меню
-        self.router.message.register(self.main_menu_handler, StateFilter(UserStates.main_menu))
-        
-        # Просмотр новостей
-        self.router.message.register(self.news_handler, StateFilter(UserStates.viewing_news))
-        
-        # Выбор клуба
-        self.router.message.register(self.club_selection_handler, StateFilter(UserStates.selecting_club))
-
-    async def get_news_data(self):
-        """Получение данных новостей с обработкой асинхронности"""
-        if self.is_parsing:
-            return self.news_data
-            
-        self.is_parsing = True
-        try:
-            # Запускаем парсинг в отдельном потоке, так как он синхронный
-            loop = asyncio.get_event_loop()
-            news = await loop.run_in_executor(None, scrap_main)
-            
-            # Фильтруем пустые новости
-            if news:
-                self.news_data = [item for item in news if item.get('title')]
-                logger.info(f"Успешно загружено {len(self.news_data)} новостей")
-            else:
-                logger.warning("Парсер вернул пустой список новостей")
-                self.news_data = []
-                
-            return self.news_data
-        except Exception as e:
-            logger.error(f"Ошибка при парсинге новостей: {e}")
-            return []
-        finally:
-            self.is_parsing = False
-
-    async def start_handler(self, message: Message, state: FSMContext):
-        """Начало работы с ботом"""
-        user = message.from_user
-        logger.info(f"Пользователь {user.first_name} начал работу с ботом")
-        
-        # Инициализация состояния пользователя
-        user_id = user.id
-        self.current_news_index[user_id] = 0
-        
-        # Показываем сообщение о загрузке
-        loading_msg = await message.answer("🔄 Загружаю свежие новости...")
-        
-        # Загружаем новости
-        news_data = await self.get_news_data()
-        
-        # Удаляем сообщение о загрузке
-        await loading_msg.delete()
-        
-        if not news_data:
-            await message.answer("❌ Не удалось загрузить новости. Попробуйте позже.")
-            return
-        
-        # Клавиатура главного меню
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📰 Смотреть все новости")],
-                [KeyboardButton(text="🏆 Смотреть новости по конкретному клубу")]
-            ],
-            resize_keyboard=True
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /start"""
+        user = update.effective_user
+        welcome_text = (
+            f"Привет, {user.first_name}! 👋\n\n"
+            "Я бот с последними футбольными новостями из Sportbox.\n"
+            "Нажми кнопку ниже, чтобы начать просмотр новостей!"
         )
         
-        await message.answer(
-            "⚽ Добро пожаловать в футбольный новостной бот!\n"
-            f"📊 Загружено {len(news_data)} свежих новостей!\n"
-            "Выберите опцию:",
-            reply_markup=keyboard
-        )
+        keyboard = [
+            [InlineKeyboardButton("📰 Смотреть новости", callback_data="show_news_categories")],
+            [InlineKeyboardButton("🏆 Поиск по клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await state.set_state(UserStates.main_menu)
-
-    async def main_menu_handler(self, message: Message, state: FSMContext):
-        """Обработка главного меню"""
-        text = message.text
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    
+    async def show_news_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает категории новостей"""
+        keyboard = [
+            [InlineKeyboardButton("🔥 Последние новости", callback_data="news_latest")],
+            [InlineKeyboardButton("🏆 По клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if text == "📰 Смотреть все новости":
-            await self.show_all_news(message, state)
+        text = "Выберите категорию новостей:"
         
-        elif text == "🏆 Смотреть новости по конкретному клубу":
-            await self.show_club_selection_menu(message, state)
-
-    async def show_all_news(self, message: Message, state: FSMContext):
-        """Показ всех новостей"""
-        user_id = message.from_user.id
-        
-        # Обновляем новости при каждом запросе
-        news_data = await self.get_news_data()
-        
-        if not news_data:
-            await message.answer("❌ Новости временно недоступны. Попробуйте позже.")
-            return await self.show_main_menu(message, state)
-        
-        # Сбрасываем индекс для пользователя
-        self.current_news_index[user_id] = 0
-        
-        # Показываем первую новость
-        await self.show_current_news(message, state, user_id)
-        
-        await state.set_state(UserStates.viewing_news)
-
-    async def show_current_news(self, message: Message, state: FSMContext, user_id: int):
-        """Показ текущей новости"""
-        if user_id not in self.current_news_index:
-            self.current_news_index[user_id] = 0
-            
-        current_index = self.current_news_index[user_id]
-        
-        if current_index >= len(self.news_data):
-            await message.answer("📭 Новости закончились!")
-            return await self.show_main_menu(message, state)
-        
-        news_item = self.news_data[current_index]
-        
-        # Создаем сообщение с новостью
-        message_text = f"📰 {news_item.get('title', 'Без заголовка')}\n\n"
-        if news_item.get('rubric'):
-            message_text += f"🏷️ Рубрика: {news_item['rubric']}\n"
-        if news_item.get('date'):
-            message_text += f"📅 Дата: {news_item['date']}\n"
-        if news_item.get('link'):
-            message_text += f"🔗 Подробнее: {news_item['link']}\n"
-        
-        message_text += f"\n📊 Новость {current_index + 1} из {len(self.news_data)}"
-        
-        # Клавиатура для навигации
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="➡️ Следующая новость")],
-                [KeyboardButton(text="🏠 Главное меню")]
-            ],
-            resize_keyboard=True
-        )
-        
-        # Отправляем сообщение
-        try:
-            if news_item.get('image_url'):
-                await message.answer_photo(
-                    photo=news_item['image_url'],
-                    caption=message_text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await message.answer(
-                    message_text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML
-                )
-        except Exception as e:
-            logger.error(f"Ошибка отправки новости: {e}")
-            await message.answer(
-                message_text,
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-
-    async def show_club_selection_menu(self, message: Message, state: FSMContext):
-        """Меню выбора клуба"""
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="Реал Мадрид"), KeyboardButton(text="Барселона")],
-                [KeyboardButton(text="Манчестер Юнайтед"), KeyboardButton(text="Челси")],
-                [KeyboardButton(text="Бавария"), KeyboardButton(text="Ювентус")],
-                [KeyboardButton(text="🔍 Другие клубы"), KeyboardButton(text="🏠 Главное меню")]
-            ],
-            resize_keyboard=True
-        )
-        
-        await message.answer(
-            "Выберите клуб:",
-            reply_markup=keyboard
-        )
-        
-        await state.set_state(UserStates.selecting_club)
-
-    async def club_selection_handler(self, message: Message, state: FSMContext):
-        """Обработка выбора клуба"""
-        text = message.text
-        
-        if text == "🏠 Главное меню":
-            await self.show_main_menu(message, state)
-            return
-        
-        if text == "🔍 Другие клубы":
-            await message.answer("Введите название клуба:")
-            return
-        
-        # Проверяем, что выбран один из клубов
-        clubs = ["Реал Мадрид", "Барселона", "Манчестер Юнайтед", "Челси", "Бавария", "Ювентус"]
-        if text in clubs:
-            await self.show_club_news(message, state, text)
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup)
         else:
-            # Пользователь ввел свой клуб
-            await self.show_club_news(message, state, text)
-
-    async def show_club_news(self, message: Message, state: FSMContext, club_name: str):
-        """Показ новостей по клубу"""
-        user_id = message.from_user.id
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+    
+    async def show_clubs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает список клубов для фильтрации"""
+        clubs = self.get_all_clubs()
         
-        # Обновляем новости
-        news_data = await self.get_news_data()
-        
-        if not news_data:
-            await message.answer("❌ Новости временно недоступны. Попробуйте позже.")
-            return await self.show_main_menu(message, state)
-        
-        # Фильтруем новости по клубу (ищем в заголовке и рубрике)
-        club_news = []
-        for news in news_data:
-            title = news.get('title', '').lower()
-            rubric = news.get('rubric', '').lower()
-            club_lower = club_name.lower()
+        if not clubs:
+            text = "Пока нет новостей с тегами клубов. Попробуйте позже."
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-            if (club_lower in title or 
-                club_lower in rubric or
-                any(word in title for word in club_lower.split())):
-                club_news.append(news)
+            query = update.callback_query
+            await query.edit_message_text(text, reply_markup=reply_markup)
+            return
         
-        logger.info(f"Найдено новостей для клуба '{club_name}': {len(club_news)}")
+        # Создаем кнопки для клубов (по 2 в ряд)
+        keyboard = []
+        row = []
+        for club in clubs:
+            row.append(InlineKeyboardButton(club, callback_data=f"club_{club}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
         
-        if not club_news:
-            await message.answer(
-                f"❌ Новости по клубу '{club_name}' не найдены.\n"
-                "Попробуйте другой клуб или посмотрите все новости."
-            )
-            return await self.show_club_selection_menu(message, state)
+        # Добавляем кнопку назад
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
         
-        # Сохраняем отфильтрованные новости в состоянии
-        await state.update_data(
-            club_news=club_news,
-            club_news_index=0,
-            current_club=club_name
-        )
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "Выберите клуб для просмотра новостей:"
+        
+        query = update.callback_query
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    
+    async def show_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, club: str = None):
+        """Показывает первую новость"""
+        # Сохраняем текущий клуб в контексте пользователя
+        if club:
+            context.user_data['current_club'] = club
+        else:
+            context.user_data['current_club'] = None
+        
+        # Получаем новости
+        news_items = self.get_news_from_db(limit=50, club=club)
+        
+        if not news_items:
+            text = "❌ Новости не найдены. Попробуйте другой клуб или зайдите позже."
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            query = update.callback_query
+            await query.edit_message_text(text, reply_markup=reply_markup)
+            return
+        
+        # Сохраняем новости в контексте пользователя
+        context.user_data['news_items'] = news_items
+        context.user_data['current_news_index'] = 0
         
         # Показываем первую новость
-        await self.show_current_club_news(message, state, user_id)
+        await self.display_news(update, context, 0)
+    
+    async def display_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, index: int):
+        """Отображает новость по индексу"""
+        news_items = context.user_data.get('news_items', [])
         
-        await state.set_state(UserStates.viewing_news)
-
-    async def show_current_club_news(self, message: Message, state: FSMContext, user_id: int):
-        """Показ текущей новости клуба"""
-        user_data = await state.get_data()
-        club_news = user_data.get('club_news', [])
-        current_index = user_data.get('club_news_index', 0)
-        club_name = user_data.get('current_club', 'клубу')
+        if not news_items or index >= len(news_items):
+            await update.callback_query.answer("Новости закончились!", show_alert=True)
+            return
         
-        if current_index >= len(club_news):
-            await message.answer(f"📭 Новости по клубу '{club_name}' закончились!")
-            return await self.show_main_menu(message, state)
+        news_item = news_items[index]
         
-        news_item = club_news[current_index]
+        # Формируем текст новости
+        text = f"<b>{news_item['title']}</b>\n\n"
         
-        # Создаем сообщение с новостью
-        message_text = f"🏆 {club_name}\n📰 {news_item.get('title', 'Без заголовка')}\n\n"
         if news_item.get('rubric'):
-            message_text += f"🏷️ Рубрика: {news_item['rubric']}\n"
+            text += f"🏷 <b>Рубрика:</b> {news_item['rubric']}\n"
+        
         if news_item.get('date'):
-            message_text += f"📅 Дата: {news_item['date']}\n"
+            text += f"📅 <b>Дата:</b> {news_item['date']}\n"
+        
+        if news_item.get('club_tags'):
+            text += f"⚽ <b>Клубы:</b> {news_item['club_tags']}\n"
+        
+        if news_item.get('scraped_at'):
+            text += f"⏰ <b>Собрано:</b> {news_item['scraped_at']}\n"
+        
         if news_item.get('link'):
-            message_text += f"🔗 Подробнее: {news_item['link']}\n"
+            text += f"\n🔗 <a href='{news_item['link']}'>Читать на Sportbox</a>"
         
-        message_text += f"\n📊 Новость {current_index + 1} из {len(club_news)}"
+        # Создаем клавиатуру
+        keyboard = []
         
-        # Клавиатура для навигации
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="➡️ Следующая новость")],
-                [KeyboardButton(text="🏠 Главное меню")]
-            ],
-            resize_keyboard=True
-        )
+        # Кнопки навигации
+        nav_buttons = []
+        if index > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data="news_prev"))
         
-        # Отправляем сообщение
-        try:
+        nav_buttons.append(InlineKeyboardButton(f"{index + 1}/{len(news_items)}", callback_data="stats"))
+        
+        if index < len(news_items) - 1:
+            nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data="news_next"))
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        
+        # Дополнительные кнопки
+        other_buttons = []
+        if news_item.get('image_url'):
+            other_buttons.append(InlineKeyboardButton("🖼 Изображение", callback_data=f"image_{index}"))
+        
+        other_buttons.append(InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories"))
+        
+        if other_buttons:
+            keyboard.append(other_buttons)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Отправляем или редактируем сообщение
+        query = update.callback_query
+        
+        # Если есть изображение и пользователь запросил его
+        if query.data and query.data.startswith('image_'):
             if news_item.get('image_url'):
-                await message.answer_photo(
-                    photo=news_item['image_url'],
-                    caption=message_text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await message.answer(
-                    message_text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.HTML
-                )
-        except Exception as e:
-            logger.error(f"Ошибка отправки новости клуба: {e}")
-            await message.answer(
-                message_text,
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
+                try:
+                    await context.bot.send_photo(
+                        chat_id=query.message.chat_id,
+                        photo=news_item['image_url'],
+                        caption=text,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                    return
+                except Exception as e:
+                    logger.error(f"Ошибка отправки изображения: {e}")
+                    text += "\n\n❌ Не удалось загрузить изображение"
+        
+        # Редактируем существующее сообщение или отправляем новое
+        try:
+            await query.edit_message_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='HTML',
+                disable_web_page_preview=False
             )
-
-    async def news_handler(self, message: Message, state: FSMContext):
-        """Обработка навигации по новостям"""
-        text = message.text
-        user_id = message.from_user.id
+        except Exception as e:
+            logger.error(f"Ошибка редактирования сообщения: {e}")
+            await query.message.reply_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
+    
+    async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает статистику"""
+        total_news = self.get_news_count()
+        clubs = self.get_all_clubs()
         
-        if text == "➡️ Следующая новость":
-            user_data = await state.get_data()
-            
-            # Проверяем, просматриваем ли мы новости клуба или все новости
-            if 'club_news' in user_data:
-                # Новости клуба
-                current_index = user_data.get('club_news_index', 0)
-                await state.update_data(club_news_index=current_index + 1)
-                await self.show_current_club_news(message, state, user_id)
-            else:
-                # Все новости
-                self.current_news_index[user_id] += 1
-                await self.show_current_news(message, state, user_id)
-        
-        elif text == "🏠 Главное меню":
-            await self.show_main_menu(message, state)
-
-    async def show_main_menu(self, message: Message, state: FSMContext):
-        """Показ главного меню"""
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📰 Смотреть все новости")],
-                [KeyboardButton(text="🏆 Смотреть новости по конкретному клубу")]
-            ],
-            resize_keyboard=True
+        text = (
+            f"<b>📊 Статистика базы новостей</b>\n\n"
+            f"📰 Всего новостей: <b>{total_news}</b>\n"
+            f"🏆 Отслеживаемых клубов: <b>{len(clubs)}</b>\n\n"
+            f"<b>Клубы в базе:</b>\n"
         )
         
-        await message.answer(
-            "Главное меню:",
-            reply_markup=keyboard
+        for club in clubs:
+            club_news_count = len(self.get_news_from_db(club=club, limit=1000))
+            text += f"• {club}: {club_news_count} новостей\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        query = update.callback_query
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def about(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает информацию о боте"""
+        text = (
+            "<b>ℹ️ О боте</b>\n\n"
+            "Этот бот показывает последние футбольные новости с сайта Sportbox.ru\n\n"
+            "⚙️ <b>Функции:</b>\n"
+            "• Просмотр последних новостей\n"
+            "• Фильтрация по клубам\n"
+            "• Навигация между новостями\n"
+            "• Статистика базы данных\n\n"
+            "📚 <b>Данные:</b> Новости автоматически собираются и обновляются\n"
+            "🔗 <b>Источник:</b> news.sportbox.ru"
         )
         
-        await state.set_state(UserStates.main_menu)
-
-    async def run(self):
-        """Запуск бота"""
-        # Удаляем вебхук (на всякий случай)
-        await self.bot.delete_webhook(drop_pending_updates=True)
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
+        query = update.callback_query
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатий на кнопки"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        
+        if data == "show_news_categories":
+            await self.show_news_categories(update, context)
+        
+        elif data == "news_latest":
+            await self.show_news(update, context)
+        
+        elif data == "show_clubs":
+            await self.show_clubs(update, context)
+        
+        elif data.startswith("club_"):
+            club = data[5:]  # Убираем префикс "club_"
+            await self.show_news(update, context, club)
+        
+        elif data == "news_next":
+            current_index = context.user_data.get('current_news_index', 0)
+            context.user_data['current_news_index'] = current_index + 1
+            await self.display_news(update, context, current_index + 1)
+        
+        elif data == "news_prev":
+            current_index = context.user_data.get('current_news_index', 0)
+            context.user_data['current_news_index'] = current_index - 1
+            await self.display_news(update, context, current_index - 1)
+        
+        elif data.startswith("image_"):
+            index = int(data[6:])  # Получаем индекс из callback_data
+            await self.display_news(update, context, index)
+        
+        elif data == "stats":
+            await self.show_stats(update, context)
+        
+        elif data == "about":
+            await self.about(update, context)
+    
+    # Методы для работы с базой данных (аналогичные классу SimpleSportboxScraper)
+    def get_news_from_db(self, limit: int = 100, club: str = None):
+        """Получает новости из базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if club:
+            cursor.execute('''
+                SELECT * FROM news 
+                WHERE club_tags LIKE ? 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ''', (f'%{club}%', limit))
+        else:
+            cursor.execute('''
+                SELECT * FROM news 
+                ORDER BY created_at DESC 
+                LIMIT ?
+            ''', (limit,))
+        
+        news_items = []
+        columns = [column[0] for column in cursor.description]
+        
+        for row in cursor.fetchall():
+            news_item = dict(zip(columns, row))
+            news_items.append(news_item)
+        
+        conn.close()
+        return news_items
+    
+    def get_all_clubs(self):
+        """Получает список всех клубов из базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT club_tags FROM news 
+            WHERE club_tags != '' 
+            AND club_tags IS NOT NULL
+        ''')
+        
+        clubs = set()
+        for row in cursor.fetchall():
+            club_list = row[0].split(', ')
+            clubs.update(club_list)
+        
+        conn.close()
+        return sorted(list(clubs))
+    
+    def get_news_count(self):
+        """Получает общее количество новостей в базе"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM news')
+        count = cursor.fetchone()[0]
+        
+        conn.close()
+        return count
+    
+    def run(self):
+        """Запускает бота"""
         print("Бот запущен...")
-        
-        # Запускаем поллинг
-        await self.dp.start_polling(self.bot)
+        self.application.run_polling()
 
-# Запуск бота
-async def main():
-    # Замените 'YOUR_BOT_TOKEN' на токен вашего бота
-    BOT_TOKEN = "8218894092:AAGFGRvI0C-OczsJMcOFej8f9zM6AXukqL4"
+# Функция для запуска бота
+def run_bot():
+    # Токен бота (замените на свой)
+    BOT_TOKEN = "8280366470:AAFtYOsUnJ_J1IWdrh0MEExGrD6BPfOeos4"
+    
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ Пожалуйста, установите ваш токен бота!")
+        print("1. Создайте бота через @BotFather в Telegram")
+        print("2. Замените 'YOUR_BOT_TOKEN_HERE' на полученный токен")
+        return
     
     bot = FootballNewsBot(BOT_TOKEN)
-    await bot.run()
+    bot.run()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    run_bot()
