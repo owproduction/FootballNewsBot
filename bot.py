@@ -21,6 +21,9 @@ class FootballNewsBot:
         # Добавляем обработчики
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("news", self.show_news_categories))
+        self.application.add_handler(CommandHandler("leagues", self.show_leagues))
+        self.application.add_handler(CommandHandler("clubs", self.show_clubs))
+        self.application.add_handler(CommandHandler("stats", self.show_stats))
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
         
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -29,13 +32,23 @@ class FootballNewsBot:
         welcome_text = (
             f"Привет, {user.first_name}! 👋\n\n"
             "Я бот с последними футбольными новостями из Sportbox.\n"
+            "Я поддерживаю все основные европейские лиги:\n"
+            "• Английская Премьер-лига 🏴󠁧󠁢󠁥󠁮󠁧󠁿\n"
+            "• Ла Лига 🇪🇸\n"
+            "• Серия А 🇮🇹\n"
+            "• Бундеслига 🇩🇪\n"
+            "• Лига 1 🇫🇷\n"
+            "• Лига Чемпионов 🏆\n"
+            "• Лига Европы 🥈\n"
+            "• РПЛ 🇷🇺\n\n"
             "Нажми кнопку ниже, чтобы начать просмотр новостей!"
         )
         
         keyboard = [
             [InlineKeyboardButton("📰 Смотреть новости", callback_data="show_news_categories")],
-            [InlineKeyboardButton("🏆 Поиск по клубам", callback_data="show_clubs")],
-            [InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
+            [InlineKeyboardButton("🏆 Выбрать лигу", callback_data="show_leagues")],
+            [InlineKeyboardButton("⚽ Поиск по клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -44,36 +57,83 @@ class FootballNewsBot:
     async def show_news_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает категории новостей"""
         keyboard = [
-            [InlineKeyboardButton("🔥 Последние новости", callback_data="news_latest")],
-            [InlineKeyboardButton("🏆 По клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("🔥 Все новости", callback_data="news_latest_all")],
+            [InlineKeyboardButton("🏆 По лигам", callback_data="show_leagues")],
+            [InlineKeyboardButton("⚽ По клубам", callback_data="show_clubs")],
             [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        text = "Выберите категорию новостей:"
+        text = "📰 <b>Категории новостей</b>\n\nВыберите как хотите просматривать новости:"
         
         if update.message:
-            await update.message.reply_text(text, reply_markup=reply_markup)
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
         else:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_leagues(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает список лиг"""
+        leagues = self.get_all_leagues()
+        
+        if not leagues:
+            text = "❌ Пока нет новостей по лигам. Попробуйте позже."
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if update.message:
+                await update.message.reply_text(text, reply_markup=reply_markup)
+            else:
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+            return
+        
+        # Эмодзи для лиг
+        league_emojis = {
+            'Английская Премьер-лига': '🏴󠁧󠁢󠁥󠁮󠁧󠁿',
+            'Ла Лига': '🇪🇸',
+            'Серия А': '🇮🇹',
+            'Бундеслига': '🇩🇪',
+            'Лига 1': '🇫🇷',
+            'Лига Чемпионов': '🏆',
+            'Лига Европы': '🥈',
+            'Российская Премьер-лига': '🇷🇺'
+        }
+        
+        # Создаем кнопки для лиг
+        keyboard = []
+        for league in leagues:
+            emoji = league_emojis.get(league, '⚽')
+            keyboard.append([InlineKeyboardButton(f"{emoji} {league}", callback_data=f"league_{league}")])
+        
+        # Добавляем кнопку назад
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "🏆 <b>Выберите лигу</b>\n\nПросмотр новостей по выбранной лиге:"
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
     
     async def show_clubs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает список клубов для фильтрации"""
         clubs = self.get_all_clubs()
         
         if not clubs:
-            text = "Пока нет новостей с тегами клубов. Попробуйте позже."
+            text = "❌ Пока нет новостей с тегами клубов. Попробуйте позже."
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            query = update.callback_query
-            await query.edit_message_text(text, reply_markup=reply_markup)
+            if update.message:
+                await update.message.reply_text(text, reply_markup=reply_markup)
+            else:
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
             return
         
         # Создаем кнопки для клубов (по 2 в ряд)
         keyboard = []
         row = []
-        for club in clubs:
+        for club in clubs[:20]:  # Ограничиваем до 20 клубов
             row.append(InlineKeyboardButton(club, callback_data=f"club_{club}"))
             if len(row) == 2:
                 keyboard.append(row)
@@ -85,24 +145,32 @@ class FootballNewsBot:
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        text = "Выберите клуб для просмотра новостей:"
+        text = "⚽ <b>Выберите клуб</b>\n\nПросмотр новостей по выбранному клубу:"
         
-        query = update.callback_query
-        await query.edit_message_text(text, reply_markup=reply_markup)
-    
-    async def show_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, club: str = None):
-        """Показывает первую новость"""
-        # Сохраняем текущий клуб в контексте пользователя
-        if club:
-            context.user_data['current_club'] = club
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
         else:
-            context.user_data['current_club'] = None
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                       club: str = None, league: str = None, news_type: str = "all"):
+        """Показывает первую новость"""
+        # Сохраняем фильтры в контексте пользователя
+        context.user_data['current_club'] = club
+        context.user_data['current_league'] = league
+        context.user_data['news_type'] = news_type
         
         # Получаем новости
-        news_items = self.get_news_from_db(limit=50, club=club)
+        news_items = self.get_news_from_db(limit=50, club=club, league=league)
         
         if not news_items:
-            text = "❌ Новости не найдены. Попробуйте другой клуб или зайдите позже."
+            if club:
+                text = f"❌ Новости по клубу '{club}' не найдены. Попробуйте другой клуб."
+            elif league:
+                text = f"❌ Новости по лиге '{league}' не найдены. Попробуйте другую лигу."
+            else:
+                text = "❌ Новости не найдены. Попробуйте позже."
+            
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -122,10 +190,20 @@ class FootballNewsBot:
         news_items = context.user_data.get('news_items', [])
         
         if not news_items or index >= len(news_items):
-            await update.callback_query.answer("Новости закончились!", show_alert=True)
+            await update.callback_query.answer("Новости закончились! 🏁", show_alert=True)
             return
         
         news_item = news_items[index]
+        
+        # Формируем заголовок с информацией о фильтре
+        filter_info = ""
+        club = context.user_data.get('current_club')
+        league = context.user_data.get('current_league')
+        
+        if club:
+            filter_info = f" | Клуб: {club}"
+        elif league:
+            filter_info = f" | Лига: {league}"
         
         # Формируем текст новости
         text = f"<b>{news_item['title']}</b>\n\n"
@@ -135,6 +213,9 @@ class FootballNewsBot:
         
         if news_item.get('date'):
             text += f"📅 <b>Дата:</b> {news_item['date']}\n"
+        
+        if news_item.get('league'):
+            text += f"🏆 <b>Лига:</b> {news_item['league']}\n"
         
         if news_item.get('club_tags'):
             text += f"⚽ <b>Клубы:</b> {news_item['club_tags']}\n"
@@ -153,7 +234,7 @@ class FootballNewsBot:
         if index > 0:
             nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data="news_prev"))
         
-        nav_buttons.append(InlineKeyboardButton(f"{index + 1}/{len(news_items)}", callback_data="stats"))
+        nav_buttons.append(InlineKeyboardButton(f"{index + 1}/{len(news_items)}", callback_data="page_info"))
         
         if index < len(news_items) - 1:
             nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data="news_next"))
@@ -167,6 +248,12 @@ class FootballNewsBot:
             other_buttons.append(InlineKeyboardButton("🖼 Изображение", callback_data=f"image_{index}"))
         
         other_buttons.append(InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories"))
+        
+        # Кнопка возврата к фильтру
+        if club:
+            other_buttons.append(InlineKeyboardButton("⚽ К клубам", callback_data="show_clubs"))
+        elif league:
+            other_buttons.append(InlineKeyboardButton("🏆 К лигам", callback_data="show_leagues"))
         
         if other_buttons:
             keyboard.append(other_buttons)
@@ -212,44 +299,39 @@ class FootballNewsBot:
     async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает статистику"""
         total_news = self.get_news_count()
+        leagues = self.get_all_leagues()
         clubs = self.get_all_clubs()
         
         text = (
             f"<b>📊 Статистика базы новостей</b>\n\n"
-            f"📰 Всего новостей: <b>{total_news}</b>\n"
-            f"🏆 Отслеживаемых клубов: <b>{len(clubs)}</b>\n\n"
-            f"<b>Клубы в базе:</b>\n"
+            f"📰 <b>Всего новостей:</b> {total_news}\n"
+            f"🏆 <b>Лиг в базе:</b> {len(leagues)}\n"
+            f"⚽ <b>Отслеживаемых клубов:</b> {len(clubs)}\n\n"
         )
         
-        for club in clubs:
-            club_news_count = len(self.get_news_from_db(club=club, limit=1000))
-            text += f"• {club}: {club_news_count} новостей\n"
+        # Статистика по лигам
+        if leagues:
+            text += "<b>Статистика по лигам:</b>\n"
+            for league in leagues:
+                league_news_count = self.get_news_count(league=league)
+                text += f"• {league}: {league_news_count} новостей\n"
         
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+        # Популярные клубы
+        if clubs:
+            text += f"\n<b>Клубы в базе:</b>\n{', '.join(clubs[:15])}"
+            if len(clubs) > 15:
+                text += f" и ещё {len(clubs) - 15}..."
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить статистику", callback_data="stats")],
+            [InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        query = update.callback_query
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    
-    async def about(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показывает информацию о боте"""
-        text = (
-            "<b>ℹ️ О боте</b>\n\n"
-            "Этот бот показывает последние футбольные новости с сайта Sportbox.ru\n\n"
-            "⚙️ <b>Функции:</b>\n"
-            "• Просмотр последних новостей\n"
-            "• Фильтрация по клубам\n"
-            "• Навигация между новостями\n"
-            "• Статистика базы данных\n\n"
-            "📚 <b>Данные:</b> Новости автоматически собираются и обновляются\n"
-            "🔗 <b>Источник:</b> news.sportbox.ru"
-        )
-        
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        query = update.callback_query
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
     
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на кнопки"""
@@ -261,15 +343,22 @@ class FootballNewsBot:
         if data == "show_news_categories":
             await self.show_news_categories(update, context)
         
-        elif data == "news_latest":
+        elif data == "news_latest_all":
             await self.show_news(update, context)
+        
+        elif data == "show_leagues":
+            await self.show_leagues(update, context)
         
         elif data == "show_clubs":
             await self.show_clubs(update, context)
         
+        elif data.startswith("league_"):
+            league = data[7:]  # Убираем префикс "league_"
+            await self.show_news(update, context, league=league)
+        
         elif data.startswith("club_"):
             club = data[5:]  # Убираем префикс "club_"
-            await self.show_news(update, context, club)
+            await self.show_news(update, context, club=club)
         
         elif data == "news_next":
             current_index = context.user_data.get('current_news_index', 0)
@@ -288,28 +377,33 @@ class FootballNewsBot:
         elif data == "stats":
             await self.show_stats(update, context)
         
-        elif data == "about":
-            await self.about(update, context)
+        elif data == "page_info":
+            # Просто показываем информацию о текущей странице
+            current_index = context.user_data.get('current_news_index', 0)
+            news_items = context.user_data.get('news_items', [])
+            await query.answer(f"Страница {current_index + 1} из {len(news_items)}")
     
-    # Методы для работы с базой данных (аналогичные классу SimpleSportboxScraper)
-    def get_news_from_db(self, limit: int = 100, club: str = None):
+    # Методы для работы с базой данных
+    def get_news_from_db(self, limit: int = 100, club: str = None, league: str = None):
         """Получает новости из базы данных"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
+        query = 'SELECT * FROM news WHERE 1=1'
+        params = []
+        
         if club:
-            cursor.execute('''
-                SELECT * FROM news 
-                WHERE club_tags LIKE ? 
-                ORDER BY created_at DESC 
-                LIMIT ?
-            ''', (f'%{club}%', limit))
-        else:
-            cursor.execute('''
-                SELECT * FROM news 
-                ORDER BY created_at DESC 
-                LIMIT ?
-            ''', (limit,))
+            query += ' AND club_tags LIKE ?'
+            params.append(f'%{club}%')
+        
+        if league:
+            query += ' AND league = ?'
+            params.append(league)
+            
+        query += ' ORDER BY created_at DESC LIMIT ?'
+        params.append(limit)
+        
+        cursor.execute(query, params)
         
         news_items = []
         columns = [column[0] for column in cursor.description]
@@ -335,25 +429,50 @@ class FootballNewsBot:
         clubs = set()
         for row in cursor.fetchall():
             club_list = row[0].split(', ')
-            clubs.update(club_list)
+            clubs.update([club.strip() for club in club_list if club.strip()])
         
         conn.close()
         return sorted(list(clubs))
     
-    def get_news_count(self):
+    def get_all_leagues(self):
+        """Получает список всех лиг из базы данных"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT league FROM news 
+            WHERE league != '' 
+            AND league IS NOT NULL
+            ORDER BY league
+        ''')
+        
+        leagues = [row[0] for row in cursor.fetchall() if row[0]]
+        conn.close()
+        return sorted(list(set(leagues)))
+    
+    def get_news_count(self, league: str = None):
         """Получает общее количество новостей в базе"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT COUNT(*) FROM news')
+        if league:
+            cursor.execute('SELECT COUNT(*) FROM news WHERE league = ?', (league,))
+        else:
+            cursor.execute('SELECT COUNT(*) FROM news')
+            
         count = cursor.fetchone()[0]
-        
         conn.close()
         return count
     
     def run(self):
         """Запускает бота"""
         print("Бот запущен...")
+        print("Доступные команды:")
+        print("/start - Начать работу")
+        print("/news - Показать новости")
+        print("/leagues - Выбрать лигу")
+        print("/clubs - Выбрать клуб")
+        print("/stats - Статистика")
         self.application.run_polling()
 
 # Функция для запуска бота
