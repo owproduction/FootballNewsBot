@@ -1,9 +1,10 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import sqlite3
 from typing import List, Dict
 import os
+import re
 
 # Настройка логирования
 logging.basicConfig(
@@ -18,13 +19,21 @@ class FootballNewsBot:
         self.db_path = db_path
         self.application = Application.builder().token(token).build()
         
+        # 10 самых популярных футболистов для быстрого поиска
+        self.popular_players = [
+            "Месси", "Роналду", "Мбаппе", "Халанд", "Неймар", 
+            "Бензема", "Салех", "Де Брейне", "Кейн", "Модрич"
+        ]
+        
         # Добавляем обработчики
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("news", self.show_news_categories))
         self.application.add_handler(CommandHandler("leagues", self.show_leagues))
         self.application.add_handler(CommandHandler("clubs", self.show_clubs))
+        self.application.add_handler(CommandHandler("players", self.show_players_search))
         self.application.add_handler(CommandHandler("stats", self.show_stats))
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_player_search))
         
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -48,6 +57,7 @@ class FootballNewsBot:
             [InlineKeyboardButton("📰 Смотреть новости", callback_data="show_news_categories")],
             [InlineKeyboardButton("🏆 Выбрать лигу", callback_data="show_leagues")],
             [InlineKeyboardButton("⚽ Поиск по клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("👤 Поиск по игрокам", callback_data="search_players")],
             [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -60,6 +70,7 @@ class FootballNewsBot:
             [InlineKeyboardButton("🔥 Все новости", callback_data="news_latest_all")],
             [InlineKeyboardButton("🏆 По лигам", callback_data="show_leagues")],
             [InlineKeyboardButton("⚽ По клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("👤 По игрокам", callback_data="search_players")],
             [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -152,30 +163,101 @@ class FootballNewsBot:
         else:
             await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
     
+    async def show_players_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает интерфейс поиска по игрокам"""
+        text = (
+            "👤 <b>Поиск новостей по игрокам</b>\n\n"
+            "Выберите одного из популярных игроков или введите имя игрока вручную:\n"
+            "• Поиск работает по заголовкам новостей\n"
+            "• Можно вводить фамилию или полное имя\n"
+        )
+        
+        # Создаем кнопки для популярных игроков (по 2 в ряд)
+        keyboard = []
+        row = []
+        for player in self.popular_players:
+            row.append(InlineKeyboardButton(player, callback_data=f"player_{player}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        
+        # Добавляем кнопку ручного ввода и назад
+        keyboard.append([InlineKeyboardButton("✏️ Ввести имя вручную", callback_data="manual_player_search")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_manual_player_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает интерфейс ручного ввода имени игрока"""
+        text = (
+            "👤 <b>Поиск по игрокам - ручной ввод</b>\n\n"
+            "Введите имя игрока для поиска:\n"
+            "• Можно вводить фамилию или полное имя\n"
+            "• Например: <i>Месси</i>, <i>Роналду</i>, <i>Мбаппе</i>\n"
+            "• Поиск работает по заголовкам новостей"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🔙 К списку игроков", callback_data="search_players")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def handle_player_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает поиск по игрокам"""
+        player_name = update.message.text.strip()
+        
+        if len(player_name) < 2:
+            await update.message.reply_text(
+                "❌ Слишком короткий запрос. Введите минимум 2 символа.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К списку игроков", callback_data="search_players")]])
+            )
+            return
+        
+        # Сохраняем имя игрока для использования в callback
+        context.user_data['player_search'] = player_name
+        
+        # Ищем новости по игроку
+        await self.show_news(update, context, player=player_name)
+    
     async def show_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                       club: str = None, league: str = None, news_type: str = "all"):
+                       club: str = None, league: str = None, player: str = None, news_type: str = "all"):
         """Показывает первую новость"""
         # Сохраняем фильтры в контексте пользователя
         context.user_data['current_club'] = club
         context.user_data['current_league'] = league
+        context.user_data['current_player'] = player
         context.user_data['news_type'] = news_type
         
         # Получаем новости
-        news_items = self.get_news_from_db(limit=50, club=club, league=league)
+        news_items = self.get_news_from_db(limit=50, club=club, league=league, player=player)
         
         if not news_items:
             if club:
                 text = f"❌ Новости по клубу '{club}' не найдены. Попробуйте другой клуб."
             elif league:
                 text = f"❌ Новости по лиге '{league}' не найдены. Попробуйте другую лигу."
+            elif player:
+                text = f"❌ Новости по игроку '{player}' не найдены. Попробуйте другое имя."
             else:
                 text = "❌ Новости не найдены. Попробуйте позже."
             
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            query = update.callback_query
-            await query.edit_message_text(text, reply_markup=reply_markup)
+            if hasattr(update, 'callback_query'):
+                query = update.callback_query
+                await query.edit_message_text(text, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(text, reply_markup=reply_markup)
             return
         
         # Сохраняем новости в контексте пользователя
@@ -190,7 +272,8 @@ class FootballNewsBot:
         news_items = context.user_data.get('news_items', [])
         
         if not news_items or index >= len(news_items):
-            await update.callback_query.answer("Новости закончились! 🏁", show_alert=True)
+            if hasattr(update, 'callback_query'):
+                await update.callback_query.answer("Новости закончились! 🏁", show_alert=True)
             return
         
         news_item = news_items[index]
@@ -199,11 +282,14 @@ class FootballNewsBot:
         filter_info = ""
         club = context.user_data.get('current_club')
         league = context.user_data.get('current_league')
+        player = context.user_data.get('current_player')
         
         if club:
             filter_info = f" | Клуб: {club}"
         elif league:
             filter_info = f" | Лига: {league}"
+        elif player:
+            filter_info = f" | Игрок: {player}"
         
         # Формируем текст новости
         text = f"<b>{news_item['title']}</b>\n\n"
@@ -220,8 +306,19 @@ class FootballNewsBot:
         if news_item.get('club_tags'):
             text += f"⚽ <b>Клубы:</b> {news_item['club_tags']}\n"
         
-        if news_item.get('scraped_at'):
-            text += f"⏰ <b>Собрано:</b> {news_item['scraped_at']}\n"
+        # УБРАНА СТРОКА С ДАТОЙ СБОРА НОВОСТИ (scraped_at)
+        # if news_item.get('scraped_at'):
+        #     text += f"⏰ <b>Собрано:</b> {news_item['scraped_at']}\n"
+        
+        # Подсвечиваем имя игрока в заголовке, если есть поиск по игроку
+        if player:
+            # Находим упоминания игрока в заголовке (регистронезависимо)
+            pattern = re.compile(re.escape(player), re.IGNORECASE)
+            highlighted_title = pattern.sub(f"<b>{player}</b>", news_item['title'])
+            text = f"<b>{highlighted_title}</b>\n\n" + text.split('\n\n', 1)[1]
+            
+            # Добавляем информацию о поиске
+            text += f"\n🔍 <i>Найдено по поиску: '{player}'</i>\n"
         
         if news_item.get('link'):
             text += f"\n🔗 <a href='{news_item['link']}'>Читать на Sportbox</a>"
@@ -243,17 +340,17 @@ class FootballNewsBot:
             keyboard.append(nav_buttons)
         
         # Дополнительные кнопки
-        other_buttons = []
-        if news_item.get('image_url'):
-            other_buttons.append(InlineKeyboardButton("🖼 Изображение", callback_data=f"image_{index}"))
-        
-        other_buttons.append(InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories"))
+        other_buttons = [
+            InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories")
+        ]
         
         # Кнопка возврата к фильтру
         if club:
             other_buttons.append(InlineKeyboardButton("⚽ К клубам", callback_data="show_clubs"))
         elif league:
             other_buttons.append(InlineKeyboardButton("🏆 К лигам", callback_data="show_leagues"))
+        elif player:
+            other_buttons.append(InlineKeyboardButton("👤 К игрокам", callback_data="search_players"))
         
         if other_buttons:
             keyboard.append(other_buttons)
@@ -261,35 +358,27 @@ class FootballNewsBot:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Отправляем или редактируем сообщение
-        query = update.callback_query
-        
-        # Если есть изображение и пользователь запросил его
-        if query.data and query.data.startswith('image_'):
-            if news_item.get('image_url'):
-                try:
-                    await context.bot.send_photo(
-                        chat_id=query.message.chat_id,
-                        photo=news_item['image_url'],
-                        caption=text,
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                    return
-                except Exception as e:
-                    logger.error(f"Ошибка отправки изображения: {e}")
-                    text += "\n\n❌ Не удалось загрузить изображение"
-        
-        # Редактируем существующее сообщение или отправляем новое
-        try:
-            await query.edit_message_text(
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode='HTML',
-                disable_web_page_preview=False
-            )
-        except Exception as e:
-            logger.error(f"Ошибка редактирования сообщения: {e}")
-            await query.message.reply_text(
+        if hasattr(update, 'callback_query'):
+            query = update.callback_query
+            
+            # Редактируем существующее сообщение или отправляем новое
+            try:
+                await query.edit_message_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML',
+                    disable_web_page_preview=False
+                )
+            except Exception as e:
+                logger.error(f"Ошибка редактирования сообщения: {e}")
+                await query.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML',
+                    disable_web_page_preview=False
+                )
+        else:
+            await update.message.reply_text(
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode='HTML',
@@ -306,7 +395,8 @@ class FootballNewsBot:
             f"<b>📊 Статистика базы новостей</b>\n\n"
             f"📰 <b>Всего новостей:</b> {total_news}\n"
             f"🏆 <b>Лиг в базе:</b> {len(leagues)}\n"
-            f"⚽ <b>Отслеживаемых клубов:</b> {len(clubs)}\n\n"
+            f"⚽ <b>Отслеживаемых клубов:</b> {len(clubs)}\n"
+            f"👤 <b>Популярных игроков:</b> {len(self.popular_players)}\n\n"
         )
         
         # Статистика по лигам
@@ -318,9 +408,9 @@ class FootballNewsBot:
         
         # Популярные клубы
         if clubs:
-            text += f"\n<b>Клубы в базе:</b>\n{', '.join(clubs[:15])}"
-            if len(clubs) > 15:
-                text += f" и ещё {len(clubs) - 15}..."
+            text += f"\n<b>Клубы в базе:</b>\n{', '.join(clubs[:10])}"
+            if len(clubs) > 10:
+                text += f" и ещё {len(clubs) - 10}..."
         
         keyboard = [
             [InlineKeyboardButton("🔄 Обновить статистику", callback_data="stats")],
@@ -352,6 +442,16 @@ class FootballNewsBot:
         elif data == "show_clubs":
             await self.show_clubs(update, context)
         
+        elif data == "search_players":
+            await self.show_players_search(update, context)
+        
+        elif data == "manual_player_search":
+            await self.show_manual_player_search(update, context)
+        
+        elif data.startswith("player_"):
+            player = data[7:]  # Убираем префикс "player_"
+            await self.show_news(update, context, player=player)
+        
         elif data.startswith("league_"):
             league = data[7:]  # Убираем префикс "league_"
             await self.show_news(update, context, league=league)
@@ -370,10 +470,6 @@ class FootballNewsBot:
             context.user_data['current_news_index'] = current_index - 1
             await self.display_news(update, context, current_index - 1)
         
-        elif data.startswith("image_"):
-            index = int(data[6:])  # Получаем индекс из callback_data
-            await self.display_news(update, context, index)
-        
         elif data == "stats":
             await self.show_stats(update, context)
         
@@ -384,7 +480,7 @@ class FootballNewsBot:
             await query.answer(f"Страница {current_index + 1} из {len(news_items)}")
     
     # Методы для работы с базой данных
-    def get_news_from_db(self, limit: int = 100, club: str = None, league: str = None):
+    def get_news_from_db(self, limit: int = 100, club: str = None, league: str = None, player: str = None):
         """Получает новости из базы данных"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -399,6 +495,11 @@ class FootballNewsBot:
         if league:
             query += ' AND league = ?'
             params.append(league)
+            
+        if player:
+            # Ищем только в заголовке, так как поле content отсутствует в текущем парсере
+            query += ' AND title LIKE ?'
+            params.append(f'%{player}%')
             
         query += ' ORDER BY created_at DESC LIMIT ?'
         params.append(limit)
@@ -472,7 +573,9 @@ class FootballNewsBot:
         print("/news - Показать новости")
         print("/leagues - Выбрать лигу")
         print("/clubs - Выбрать клуб")
+        print("/players - Поиск по игрокам")
         print("/stats - Статистика")
+        print(f"\nПопулярные игроки для поиска: {', '.join(self.popular_players)}")
         self.application.run_polling()
 
 # Функция для запуска бота

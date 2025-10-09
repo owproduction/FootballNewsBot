@@ -1,284 +1,485 @@
-import requests
-from bs4 import BeautifulSoup
-import time
-import json
-import csv
-import os
-from datetime import datetime
-import random
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import sqlite3
 from typing import List, Dict
+import os
+import re
 
-class SimpleSportboxScraper:
-    def __init__(self, db_path: str = "football_news.db"):
-        self.news_data = []
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+class FootballNewsBot:
+    def __init__(self, token: str, db_path: str = "football_news.db"):
+        self.token = token
         self.db_path = db_path
-        os.makedirs('sportbox_news', exist_ok=True)
-        self.init_database()
+        self.application = Application.builder().token(token).build()
         
-        # URL-адреса для разных лиг
-        self.league_urls = {
-           'champions_league': "https://news.sportbox.ru/Vidy_sporta/Futbol/Liga_Chempionov",
-            'premier_league': "https://news.sportbox.ru/Vidy_sporta/Futbol/Evropejskie_chempionaty/Angliya",
-            'la_liga': "https://news.sportbox.ru/Vidy_sporta/Futbol/Evropejskie_chempionaty/Ispaniya",
-            'serie_a': "https://news.sportbox.ru/Vidy_sporta/Futbol/Evropejskie_chempionaty/Italiya",
-            'bundesliga': "https://news.sportbox.ru/Vidy_sporta/Futbol/Evropejskie_chempionaty/Germaniya",
-            'ligue_1': "https://news.sportbox.ru/Vidy_sporta/Futbol/Evropejskie_chempionaty/Franciya",
-            'europa_league': "https://news.sportbox.ru/Vidy_sporta/Futbol/europa_league",
-            'rpl': "https://news.sportbox.ru/Vidy_sporta/Futbol/Russia/premier_league"
-        }
-        
-    def init_database(self):
-        """Инициализация базы данных"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Создаем таблицу, если она не существует
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS news (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                link TEXT UNIQUE,
-                rubric TEXT,
-                date TEXT,
-                image_url TEXT,
-                scraped_at TEXT,
-                club_tags TEXT,
-                league TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Проверяем существование колонки league и добавляем если нужно
-        cursor.execute("PRAGMA table_info(news)")
-        columns = [column[1] for column in cursor.fetchall()]
-        
-        if 'league' not in columns:
-            print("Добавляем колонку 'league' в таблицу...")
-            cursor.execute('ALTER TABLE news ADD COLUMN league TEXT')
-        
-        # Создаем индексы для быстрого поиска
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_title ON news(title)
-        ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_club_tags ON news(club_tags)
-        ''')
-        
-        # Создаем индекс для league только если колонка существует
-        if 'league' in columns:
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_league ON news(league)
-            ''')
-        
-        conn.commit()
-        conn.close()
-        print(f"База данных инициализирована: {self.db_path}")
-        
-    def get_page_content(self, url):
-        """Получаем контент страницы"""
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-        }
-        
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            print(f"Ошибка загрузки страницы {url}: {e}")
-            return None
-
-    def extract_club_tags(self, title: str, league: str = "") -> str:
-        """Извлекает теги клубов из заголовка с учетом лиги"""
-        clubs = {
-            # Английская Премьер-лига
-            'Манчестер Юнайтед': ['манчестер юнайтед', 'manchester united', 'ман юнайтед'],
-            'Манчестер Сити': ['манчестер сити', 'manchester city'],
-            'Ливерпуль': ['ливерпуль', 'liverpool'],
-            'Челси': ['челси', 'chelsea'],
-            'Арсенал': ['арсенал', 'arsenal'],
-            'Тоттенхэм': ['тоттенхэм', 'tottenham'],
-            'Ньюкасл': ['ньюкасл', 'newcastle'],
-            'Астон Вилла': ['астон вилла', 'aston villa'],
-            'Вест Хэм': ['вест хэм', 'west ham'],
-            'Брайтон': ['брайтон', 'brighton'],
-            
-            # Ла Лига
-            'Реал Мадрид': ['реал', 'мадрид', 'real madrid'],
-            'Барселона': ['барселона', 'barcelona', 'барса'],
-            'Атлетико Мадрид': ['атлетико мадрид', 'atletico madrid'],
-            'Севилья': ['севилья', 'sevilla'],
-            'Валенсия': ['валенсия', 'valencia'],
-            'Вильярреал': ['вильярреал', 'villarreal'],
-            'Атлетик Бильбао': ['атлетик бильбао', 'athletic bilbao'],
-            'Реал Сосьедад': ['реал сосьедад', 'real sociedad'],
-            
-            # Серия А
-            'Ювентус': ['ювентус', 'juventus'],
-            'Милан': ['милан', 'milan'],
-            'Интер': ['интер', 'inter'],
-            'Наполи': ['наполи', 'napoli'],
-            'Рома': ['рома', 'roma'],
-            'Лацио': ['лацио', 'lazio'],
-            'Аталанта': ['аталанта', 'atalanta'],
-            'Фиорентина': ['фиорентина', 'fiorentina'],
-            
-            # Бундеслига
-            'Бавария': ['бавария', 'bayern', 'бавария мюнхен'],
-            'Боруссия Дортмунд': ['боруссия', 'dortmund', 'дортмунд', 'borussia dortmund'],
-            'Байер Леверкузен': ['байер леверкузен', 'bayer leverkusen', 'леверкузен'],
-            'РБ Лейпциг': ['рб лейпциг', 'rb leipzig', 'лейпциг'],
-            'Боруссия Мёнхенгладбах': ['боруссия мёнхенгладбах', 'borussia mönchengladbach'],
-            'Айнтрахт Франкфурт': ['айнтрахт франкфурт', 'eintracht frankfurt'],
-            'Вольфсбург': ['вольфсбург', 'wolfsburg'],
-            'Хоффенхайм': ['хоффенхайм', 'hoffenheim'],
-            
-            # Лига 1
-            'ПСЖ': ['псж', 'psg', 'пари сен-жермен'],
-            'Марсель': ['марсель', 'marseille'],
-            'Лион': ['лион', 'lyon'],
-            'Монако': ['монако', 'monaco'],
-            'Лилль': ['лилль', 'lille'],
-            'Ренн': ['ренн', 'rennes'],
-            'Ницца': ['ница', 'nice'],
-            
-            # Лига Чемпионов/Европы
-            'Байерн': ['байерн', 'bayern'],
-            'Реал': ['реал', 'real'],
-            'Барса': ['барса', 'barca'],
-            'Ман Юнайтед': ['ман юнайтед', 'man united'],
-            'Ман Сити': ['ман сити', 'man city'],
-            
-            # Российская Премьер-лига
-            'Зенит': ['зенит', 'zenit'],
-            'Спартак': ['спартак', 'spartak'],
-            'ЦСКА': ['цска', 'cska'],
-            'Локомотив': ['локомотив', 'lokomotiv'],
-            'Динамо': ['динамо', 'dynamo'],
-            'Краснодар': ['краснодар', 'krasnodar'],
-            'Ростов': ['ростов', 'rostov']
-        }
-        
-        found_clubs = []
-        title_lower = title.lower()
-        
-        for club, keywords in clubs.items():
-            if any(keyword in title_lower for keyword in keywords):
-                found_clubs.append(club)
-                
-        return ', '.join(found_clubs) if found_clubs else ''
-
-    def parse_news(self, html_content, league_name=""):
-        """Парсим новости"""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        news_items = []
-        
-        # Ищем новости в разных возможных контейнерах
-        selectors = [
-            '#teazers ul.list li',
-            '.teaser-list .teaser-item',
-            '.news-list .news-item',
-            '.b-news-list .b-news-item',
-            '.news-item',
-            '.teaser-item',
-            '.b-news-teaser-item',
-            '.b-news-list__item'
+        # 10 самых популярных футболистов для быстрого поиска
+        self.popular_players = [
+            "Месси", "Роналду", "Мбаппе", "Халанд", "Неймар", 
+            "Бензема", "Салех", "Де Брейне", "Кейн", "Модрич"
         ]
         
-        for selector in selectors:
-            elements = soup.select(selector)
-            if elements:
-                print(f"Найдено элементов по селектору {selector}: {len(elements)}")
-                for element in elements:
-                    news_item = self.extract_news_data(element, league_name)
-                    if news_item and news_item['title']:
-                        news_items.append(news_item)
-                break
+        # Добавляем обработчики
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("news", self.show_news_categories))
+        self.application.add_handler(CommandHandler("leagues", self.show_leagues))
+        self.application.add_handler(CommandHandler("clubs", self.show_clubs))
+        self.application.add_handler(CommandHandler("players", self.show_players_search))
+        self.application.add_handler(CommandHandler("stats", self.show_stats))
+        self.application.add_handler(CallbackQueryHandler(self.button_handler))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_player_search))
         
-        return news_items
-
-    def extract_news_data(self, element, league_name=""):
-        """Извлекаем данные новости"""
-        try:
-            # Заголовок
-            title_elem = element.select_one('.title .text, .teaser-title, .news-title, .b-news-title, .title, .b-news-teaser-item__title')
-            title = title_elem.get_text(strip=True) if title_elem else ""
-            
-            # Ссылка
-            link_elem = element.find('a')
-            link = link_elem.get('href') if link_elem else ""
-            if link and not link.startswith('http'):
-                link = 'https://news.sportbox.ru' + link
-            
-            # Рубрика
-            rubric_elem = element.select_one('.rubric, .teaser-rubric, .news-rubric, .b-news-rubric, .b-news-teaser-item__rubric')
-            rubric = rubric_elem.get_text(strip=True) if rubric_elem else ""
-            
-            # Дата
-            date_elem = element.select_one('.date, .teaser-date, .news-date, .b-news-date, .b-news-teaser-item__date')
-            date = date_elem.get_text(strip=True) if date_elem else ""
-            
-            # Изображение
-            img_elem = element.find('img')
-            image_url = img_elem.get('src') if img_elem else ""
-            if image_url and not image_url.startswith('http'):
-                image_url = 'https:' + image_url
-            
-            # Извлекаем теги клубов
-            club_tags = self.extract_club_tags(title, league_name)
-            
-            return {
-                'title': title,
-                'link': link,
-                'rubric': rubric,
-                'date': date,
-                'image_url': image_url,
-                'club_tags': club_tags,
-                'league': league_name,
-                'scraped_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-        except Exception as e:
-            print(f"Ошибка извлечения: {e}")
-            return None
-
-    def save_to_database(self, news_items: List[Dict]):
-        """Сохраняет новости в базу данных"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /start"""
+        user = update.effective_user
+        welcome_text = (
+            f"Привет, {user.first_name}! 👋\n\n"
+            "Я бот с последними футбольными новостями из Sportbox.\n"
+            "Я поддерживаю все основные европейские лиги:\n"
+            "• Английская Премьер-лига 🏴󠁧󠁢󠁥󠁮󠁧󠁿\n"
+            "• Ла Лига 🇪🇸\n"
+            "• Серия А 🇮🇹\n"
+            "• Бундеслига 🇩🇪\n"
+            "• Лига 1 🇫🇷\n"
+            "• Лига Чемпионов 🏆\n"
+            "• Лига Европы 🥈\n"
+            "• РПЛ 🇷🇺\n\n"
+            "Нажми кнопку ниже, чтобы начать просмотр новостей!"
+        )
         
-        saved_count = 0
-        for item in news_items:
+        keyboard = [
+            [InlineKeyboardButton("📰 Смотреть новости", callback_data="show_news_categories")],
+            [InlineKeyboardButton("🏆 Выбрать лигу", callback_data="show_leagues")],
+            [InlineKeyboardButton("⚽ Поиск по клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("👤 Поиск по игрокам", callback_data="search_players")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    
+    async def show_news_categories(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает категории новостей"""
+        keyboard = [
+            [InlineKeyboardButton("🔥 Все новости", callback_data="news_latest_all")],
+            [InlineKeyboardButton("🏆 По лигам", callback_data="show_leagues")],
+            [InlineKeyboardButton("⚽ По клубам", callback_data="show_clubs")],
+            [InlineKeyboardButton("👤 По игрокам", callback_data="search_players")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = "📰 <b>Категории новостей</b>\n\nВыберите как хотите просматривать новости:"
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_leagues(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает список лиг"""
+        leagues = self.get_all_leagues()
+        
+        if not leagues:
+            text = "❌ Пока нет новостей по лигам. Попробуйте позже."
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if update.message:
+                await update.message.reply_text(text, reply_markup=reply_markup)
+            else:
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+            return
+        
+        # Эмодзи для лиг
+        league_emojis = {
+            'Английская Премьер-лига': '🏴󠁧󠁢󠁥󠁮󠁧󠁿',
+            'Ла Лига': '🇪🇸',
+            'Серия А': '🇮🇹',
+            'Бундеслига': '🇩🇪',
+            'Лига 1': '🇫🇷',
+            'Лига Чемпионов': '🏆',
+            'Лига Европы': '🥈',
+            'Российская Премьер-лига': '🇷🇺'
+        }
+        
+        # Создаем кнопки для лиг
+        keyboard = []
+        for league in leagues:
+            emoji = league_emojis.get(league, '⚽')
+            keyboard.append([InlineKeyboardButton(f"{emoji} {league}", callback_data=f"league_{league}")])
+        
+        # Добавляем кнопку назад
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "🏆 <b>Выберите лигу</b>\n\nПросмотр новостей по выбранной лиге:"
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_clubs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает список клубов для фильтрации"""
+        clubs = self.get_all_clubs()
+        
+        if not clubs:
+            text = "❌ Пока нет новостей с тегами клубов. Попробуйте позже."
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if update.message:
+                await update.message.reply_text(text, reply_markup=reply_markup)
+            else:
+                await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+            return
+        
+        # Создаем кнопки для клубов (по 2 в ряд)
+        keyboard = []
+        row = []
+        for club in clubs[:20]:  # Ограничиваем до 20 клубов
+            row.append(InlineKeyboardButton(club, callback_data=f"club_{club}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        
+        # Добавляем кнопку назад
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = "⚽ <b>Выберите клуб</b>\n\nПросмотр новостей по выбранному клубу:"
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_players_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает интерфейс поиска по игрокам"""
+        text = (
+            "👤 <b>Поиск новостей по игрокам</b>\n\n"
+            "Выберите одного из популярных игроков или введите имя игрока вручную:\n"
+            "• Поиск работает по заголовкам новостей\n"
+            "• Можно вводить фамилию или полное имя\n"
+        )
+        
+        # Создаем кнопки для популярных игроков (по 2 в ряд)
+        keyboard = []
+        row = []
+        for player in self.popular_players:
+            row.append(InlineKeyboardButton(player, callback_data=f"player_{player}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        
+        # Добавляем кнопку ручного ввода и назад
+        keyboard.append([InlineKeyboardButton("✏️ Ввести имя вручную", callback_data="manual_player_search")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def show_manual_player_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает интерфейс ручного ввода имени игрока"""
+        text = (
+            "👤 <b>Поиск по игрокам - ручной ввод</b>\n\n"
+            "Введите имя игрока для поиска:\n"
+            "• Можно вводить фамилию или полное имя\n"
+            "• Например: <i>Месси</i>, <i>Роналду</i>, <i>Мбаппе</i>\n"
+            "• Поиск работает по заголовкам новостей"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🔙 К списку игроков", callback_data="search_players")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def handle_player_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает поиск по игрокам"""
+        player_name = update.message.text.strip()
+        
+        if len(player_name) < 2:
+            await update.message.reply_text(
+                "❌ Слишком короткий запрос. Введите минимум 2 символа.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К списку игроков", callback_data="search_players")]])
+            )
+            return
+        
+        # Сохраняем имя игрока для использования в callback
+        context.user_data['player_search'] = player_name
+        
+        # Ищем новости по игроку
+        await self.show_news(update, context, player=player_name)
+    
+    async def show_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                       club: str = None, league: str = None, player: str = None, news_type: str = "all"):
+        """Показывает первую новость"""
+        # Сохраняем фильтры в контексте пользователя
+        context.user_data['current_club'] = club
+        context.user_data['current_league'] = league
+        context.user_data['current_player'] = player
+        context.user_data['news_type'] = news_type
+        
+        # Получаем новости
+        news_items = self.get_news_from_db(limit=50, club=club, league=league, player=player)
+        
+        if not news_items:
+            if club:
+                text = f"❌ Новости по клубу '{club}' не найдены. Попробуйте другой клуб."
+            elif league:
+                text = f"❌ Новости по лиге '{league}' не найдены. Попробуйте другую лигу."
+            elif player:
+                text = f"❌ Новости по игроку '{player}' не найдены. Попробуйте другое имя."
+            else:
+                text = "❌ Новости не найдены. Попробуйте позже."
+            
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if hasattr(update, 'callback_query'):
+                query = update.callback_query
+                await query.edit_message_text(text, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(text, reply_markup=reply_markup)
+            return
+        
+        # Сохраняем новости в контексте пользователя
+        context.user_data['news_items'] = news_items
+        context.user_data['current_news_index'] = 0
+        
+        # Показываем первую новость
+        await self.display_news(update, context, 0)
+    
+    async def display_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE, index: int):
+        """Отображает новость по индексу"""
+        news_items = context.user_data.get('news_items', [])
+        
+        if not news_items or index >= len(news_items):
+            if hasattr(update, 'callback_query'):
+                await update.callback_query.answer("Новости закончились! 🏁", show_alert=True)
+            return
+        
+        news_item = news_items[index]
+        
+        # Формируем заголовок с информацией о фильтре
+        filter_info = ""
+        club = context.user_data.get('current_club')
+        league = context.user_data.get('current_league')
+        player = context.user_data.get('current_player')
+        
+        if club:
+            filter_info = f" | Клуб: {club}"
+        elif league:
+            filter_info = f" | Лига: {league}"
+        elif player:
+            filter_info = f" | Игрок: {player}"
+        
+        # Формируем текст новости
+        text = f"<b>{news_item['title']}</b>\n\n"
+        
+        if news_item.get('rubric'):
+            text += f"🏷 <b>Рубрика:</b> {news_item['rubric']}\n"
+        
+        if news_item.get('date'):
+            text += f"📅 <b>Дата:</b> {news_item['date']}\n"
+        
+        if news_item.get('league'):
+            text += f"🏆 <b>Лига:</b> {news_item['league']}\n"
+        
+        if news_item.get('club_tags'):
+            text += f"⚽ <b>Клубы:</b> {news_item['club_tags']}\n"
+        
+        if news_item.get('scraped_at'):
+            text += f"⏰ <b>Собрано:</b> {news_item['scraped_at']}\n"
+        
+        # Подсвечиваем имя игрока в заголовке, если есть поиск по игроку
+        if player:
+            # Находим упоминания игрока в заголовке (регистронезависимо)
+            pattern = re.compile(re.escape(player), re.IGNORECASE)
+            highlighted_title = pattern.sub(f"<b>{player}</b>", news_item['title'])
+            text = f"<b>{highlighted_title}</b>\n\n" + text.split('\n\n', 1)[1]
+            
+            # Добавляем информацию о поиске
+            text += f"\n🔍 <i>Найдено по поиску: '{player}'</i>\n"
+        
+        if news_item.get('link'):
+            text += f"\n🔗 <a href='{news_item['link']}'>Читать на Sportbox</a>"
+        
+        # Создаем клавиатуру
+        keyboard = []
+        
+        # Кнопки навигации
+        nav_buttons = []
+        if index > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data="news_prev"))
+        
+        nav_buttons.append(InlineKeyboardButton(f"{index + 1}/{len(news_items)}", callback_data="page_info"))
+        
+        if index < len(news_items) - 1:
+            nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data="news_next"))
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        
+        # Дополнительные кнопки
+        other_buttons = [
+            InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories")
+        ]
+        
+        # Кнопка возврата к фильтру
+        if club:
+            other_buttons.append(InlineKeyboardButton("⚽ К клубам", callback_data="show_clubs"))
+        elif league:
+            other_buttons.append(InlineKeyboardButton("🏆 К лигам", callback_data="show_leagues"))
+        elif player:
+            other_buttons.append(InlineKeyboardButton("👤 К игрокам", callback_data="search_players"))
+        
+        if other_buttons:
+            keyboard.append(other_buttons)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Отправляем или редактируем сообщение
+        if hasattr(update, 'callback_query'):
+            query = update.callback_query
+            
+            # Редактируем существующее сообщение или отправляем новое
             try:
-                cursor.execute('''
-                    INSERT OR IGNORE INTO news 
-                    (title, link, rubric, date, image_url, scraped_at, club_tags, league)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    item['title'],
-                    item['link'],
-                    item['rubric'],
-                    item['date'],
-                    item['image_url'],
-                    item['scraped_at'],
-                    item.get('club_tags', ''),
-                    item.get('league', '')
-                ))
-                saved_count += 1
-            except sqlite3.IntegrityError:
-                # Пропускаем дубликаты (UNIQUE constraint on link)
-                continue
+                await query.edit_message_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML',
+                    disable_web_page_preview=False
+                )
             except Exception as e:
-                print(f"Ошибка сохранения новости в БД: {e}")
+                logger.error(f"Ошибка редактирования сообщения: {e}")
+                await query.message.reply_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML',
+                    disable_web_page_preview=False
+                )
+        else:
+            await update.message.reply_text(
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
+    
+    async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает статистику"""
+        total_news = self.get_news_count()
+        leagues = self.get_all_leagues()
+        clubs = self.get_all_clubs()
         
-        conn.commit()
-        conn.close()
-        print(f"Сохранено новых новостей в БД: {saved_count}")
+        text = (
+            f"<b>📊 Статистика базы новостей</b>\n\n"
+            f"📰 <b>Всего новостей:</b> {total_news}\n"
+            f"🏆 <b>Лиг в базе:</b> {len(leagues)}\n"
+            f"⚽ <b>Отслеживаемых клубов:</b> {len(clubs)}\n"
+            f"👤 <b>Популярных игроков:</b> {len(self.popular_players)}\n\n"
+        )
         
-    def get_news_from_db(self, limit: int = 100, club: str = None, league: str = None):
+        # Статистика по лигам
+        if leagues:
+            text += "<b>Статистика по лигам:</b>\n"
+            for league in leagues:
+                league_news_count = self.get_news_count(league=league)
+                text += f"• {league}: {league_news_count} новостей\n"
+        
+        # Популярные клубы
+        if clubs:
+            text += f"\n<b>Клубы в базе:</b>\n{', '.join(clubs[:10])}"
+            if len(clubs) > 10:
+                text += f" и ещё {len(clubs) - 10}..."
+        
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить статистику", callback_data="stats")],
+            [InlineKeyboardButton("🏠 Главная", callback_data="show_news_categories")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if update.message:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик нажатий на кнопки"""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        
+        if data == "show_news_categories":
+            await self.show_news_categories(update, context)
+        
+        elif data == "news_latest_all":
+            await self.show_news(update, context)
+        
+        elif data == "show_leagues":
+            await self.show_leagues(update, context)
+        
+        elif data == "show_clubs":
+            await self.show_clubs(update, context)
+        
+        elif data == "search_players":
+            await self.show_players_search(update, context)
+        
+        elif data == "manual_player_search":
+            await self.show_manual_player_search(update, context)
+        
+        elif data.startswith("player_"):
+            player = data[7:]  # Убираем префикс "player_"
+            await self.show_news(update, context, player=player)
+        
+        elif data.startswith("league_"):
+            league = data[7:]  # Убираем префикс "league_"
+            await self.show_news(update, context, league=league)
+        
+        elif data.startswith("club_"):
+            club = data[5:]  # Убираем префикс "club_"
+            await self.show_news(update, context, club=club)
+        
+        elif data == "news_next":
+            current_index = context.user_data.get('current_news_index', 0)
+            context.user_data['current_news_index'] = current_index + 1
+            await self.display_news(update, context, current_index + 1)
+        
+        elif data == "news_prev":
+            current_index = context.user_data.get('current_news_index', 0)
+            context.user_data['current_news_index'] = current_index - 1
+            await self.display_news(update, context, current_index - 1)
+        
+        elif data == "stats":
+            await self.show_stats(update, context)
+        
+        elif data == "page_info":
+            # Просто показываем информацию о текущей странице
+            current_index = context.user_data.get('current_news_index', 0)
+            news_items = context.user_data.get('news_items', [])
+            await query.answer(f"Страница {current_index + 1} из {len(news_items)}")
+    
+    # Методы для работы с базой данных
+    def get_news_from_db(self, limit: int = 100, club: str = None, league: str = None, player: str = None):
         """Получает новости из базы данных"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -293,6 +494,11 @@ class SimpleSportboxScraper:
         if league:
             query += ' AND league = ?'
             params.append(league)
+            
+        if player:
+            # Ищем только в заголовке, так как поле content отсутствует в текущем парсере
+            query += ' AND title LIKE ?'
+            params.append(f'%{player}%')
             
         query += ' ORDER BY created_at DESC LIMIT ?'
         params.append(limit)
@@ -323,7 +529,7 @@ class SimpleSportboxScraper:
         clubs = set()
         for row in cursor.fetchall():
             club_list = row[0].split(', ')
-            clubs.update(club_list)
+            clubs.update([club.strip() for club in club_list if club.strip()])
         
         conn.close()
         return sorted(list(clubs))
@@ -337,9 +543,10 @@ class SimpleSportboxScraper:
             SELECT DISTINCT league FROM news 
             WHERE league != '' 
             AND league IS NOT NULL
+            ORDER BY league
         ''')
         
-        leagues = [row[0] for row in cursor.fetchall()]
+        leagues = [row[0] for row in cursor.fetchall() if row[0]]
         conn.close()
         return sorted(list(set(leagues)))
     
@@ -356,170 +563,33 @@ class SimpleSportboxScraper:
         count = cursor.fetchone()[0]
         conn.close()
         return count
-
-    def scrape_league(self, league_key: str, league_name: str, pages: int = 3):
-        """Парсит конкретную лигу"""
-        if league_key not in self.league_urls:
-            print(f"Неизвестная лига: {league_key}")
-            return []
-            
-        url = self.league_urls[league_key]
-        all_news = []
-        
-        print(f"\n=== Парсим лигу: {league_name} ===")
-        
-        for page in range(1, pages + 1):
-            print(f"Парсим страницу {page}...")
-            
-            if page == 1:
-                page_url = url
-            else:
-                page_url = f"{url}?page={page}"
-            
-            html = self.get_page_content(page_url)
-            if html:
-                news = self.parse_news(html, league_name)
-                all_news.extend(news)
-                print(f"Собрано новостей: {len(news)}")
-            
-            if page < pages:
-                time.sleep(random.uniform(2, 4))
-        
-        # Сохраняем в базу данных
-        if all_news:
-            self.save_to_database(all_news)
-        
-        return all_news
-
-    def scrape_all_leagues(self, pages: int = 2):
-        """Парсит все лиги"""
-        all_news = []
-        leagues_to_scrape = {
-            'champions_league': 'Лига Чемпионов',
-            'premier_league': 'Английская Премьер-лига',
-            'la_liga': 'Ла Лига',
-            'serie_a': 'Серия А',
-            'bundesliga': 'Бундеслига',
-            'ligue_1': 'Лига 1',
-            'europa_league': 'Лига Европы',
-            'rpl': 'Российская Премьер-лига'
-        }
-        
-        for league_key, league_name in leagues_to_scrape.items():
-            news = self.scrape_league(league_key, league_name, pages)
-            all_news.extend(news)
-            print(f"Всего собрано для {league_name}: {len(news)} новостей")
-            time.sleep(random.uniform(3, 6))  # Пауза между лигами
-        
-        return all_news
-
-    def save_data(self, data, filename_suffix=""):
-        """Сохраняем данные в файлы и базу данных"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        if filename_suffix:
-            filename_suffix = f"_{filename_suffix}"
-        
-        # JSON
-        json_filename = f'sportbox_news/sportbox_{timestamp}{filename_suffix}.json'
-        with open(json_filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        # CSV
-        if data:
-            csv_filename = f'sportbox_news/sportbox_{timestamp}{filename_suffix}.csv'
-            with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=data[0].keys())
-                writer.writeheader()
-                writer.writerows(data)
-        
-        print(f"Данные сохранены в sportbox_news/sportbox_{timestamp}{filename_suffix}.[json|csv]")
-        print(f"Всего новостей в базе данных: {self.get_news_count()}")
-
-    def print_statistics(self):
-        """Печатает статистику по лигам"""
-        print("\n=== СТАТИСТИКА БАЗЫ ДАННЫХ ===")
-        total_news = self.get_news_count()
-        print(f"Всего новостей: {total_news}")
-        
-        leagues = self.get_all_leagues()
-        for league in leagues:
-            count = self.get_news_count(league)
-            print(f"{league}: {count} новостей")
-        
-        clubs = self.get_all_clubs()
-        print(f"\nКлубы в базе: {', '.join(clubs)}")
-
-def main():
-    scraper = SimpleSportboxScraper()
     
-    print("Выберите опцию:")
-    print("1 - Парсить все лиги")
-    print("2 - Парсить конкретную лигу")
-    print("3 - Только статистика")
+    def run(self):
+        """Запускает бота"""
+        print("Бот запущен...")
+        print("Доступные команды:")
+        print("/start - Начать работу")
+        print("/news - Показать новости")
+        print("/leagues - Выбрать лигу")
+        print("/clubs - Выбрать клуб")
+        print("/players - Поиск по игрокам")
+        print("/stats - Статистика")
+        print(f"\nПопулярные игроки для поиска: {', '.join(self.popular_players)}")
+        self.application.run_polling()
+
+# Функция для запуска бота
+def run_bot():
+    # Токен бота (замените на свой)
+    BOT_TOKEN = "8280366470:AAFtYOsUnJ_J1IWdrh0MEExGrD6BPfOeos4"
     
-    choice = input("Введите номер (1-3): ").strip()
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ Пожалуйста, установите ваш токен бота!")
+        print("1. Создайте бота через @BotFather в Telegram")
+        print("2. Замените 'YOUR_BOT_TOKEN_HERE' на полученный токен")
+        return
     
-    if choice == "1":
-        # Парсим все лиги
-        news = scraper.scrape_all_leagues(pages=2)
-        
-        if news:
-            scraper.save_data(news, "all_leagues")
-            print(f"\nУспешно собрано {len(news)} новостей со всех лиг!")
-            
-            # Показываем первые 3 новости из каждой лиги
-            leagues = scraper.get_all_leagues()
-            for league in leagues:
-                league_news = scraper.get_news_from_db(limit=3, league=league)
-                print(f"\n--- Последние новости {league} ---")
-                for i, item in enumerate(league_news):
-                    print(f"{i+1}. {item['title']}")
-        
-    elif choice == "2":
-        # Парсим конкретную лигу
-        print("\nДоступные лиги:")
-        leagues = {
-            '1': ('champions_league', 'Лига Чемпионов'),
-            '2': ('premier_league', 'Английская Премьер-лига'),
-            '3': ('la_liga', 'Ла Лига'),
-            '4': ('serie_a', 'Серия А'),
-            '5': ('bundesliga', 'Бундеслига'),
-            '6': ('ligue_1', 'Лига 1'),
-            '7': ('europa_league', 'Лига Европы'),
-            '8': ('rpl', 'Российская Премьер-лига')
-        }
-        
-        for key, (_, name) in leagues.items():
-            print(f"{key} - {name}")
-        
-        league_choice = input("Выберите лигу (1-8): ").strip()
-        
-        if league_choice in leagues:
-            league_key, league_name = leagues[league_choice]
-            pages = int(input("Сколько страниц парсить? (1-5): ") or "2")
-            
-            news = scraper.scrape_league(league_key, league_name, pages)
-            
-            if news:
-                scraper.save_data(news, league_key)
-                print(f"\nУспешно собрано {len(news)} новостей для {league_name}!")
-                
-                # Показываем первые 5 новостей
-                for i, item in enumerate(news[:5]):
-                    print(f"\n{i+1}. {item['title']}")
-                    print(f"   Рубрика: {item['rubric']}")
-                    print(f"   Дата: {item['date']}")
-                    print(f"   Клубы: {item.get('club_tags', 'Не указаны')}")
-        else:
-            print("Неверный выбор лиги")
-    
-    elif choice == "3":
-        # Только статистика
-        scraper.print_statistics()
-    
-    else:
-        print("Неверный выбор")
+    bot = FootballNewsBot(BOT_TOKEN)
+    bot.run()
 
 if __name__ == "__main__":
-    main()
+    run_bot()
