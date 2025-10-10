@@ -1,7 +1,5 @@
 services:
   botervice:
-    stop-grace_period: 30s
-    stop_signal: SIGTERM
     container_name: bot-api
     build:
       context: .
