@@ -1,6 +1,6 @@
 services:
   botervice:
-    container_name: bot-api
+    container_name: bot
     build:
       context: .
       dockerfile: ./Dockerfile
