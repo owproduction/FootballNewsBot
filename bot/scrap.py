@@ -8,6 +8,7 @@ from datetime import datetime
 import random
 import sqlite3
 from typing import List, Dict
+import re
 
 class SimpleSportboxScraper:
     def __init__(self, db_path: str = "football_news.db"):
@@ -74,6 +75,50 @@ class SimpleSportboxScraper:
         conn.commit()
         conn.close()
         print(f"База данных инициализирована: {self.db_path}")
+        
+    def clean_title(self, title):
+        """Очищает заголовок от времени и дат в конце"""
+        if not title:
+            return title
+        
+        # Убираем время в формате HH:MM или HH:MM:SS в конце строки
+        cleaned_title = re.sub(r'\s*\d{1,2}:\d{2}(?::\d{2})?\s*$', '', title).strip()
+        
+        # Убираем даты в формате DD Month (например: "24 ноября", "1 декабря")
+        months = [
+            'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+            'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'
+        ]
+        
+        # Паттерн для дат типа "24 ноября", "1 декабря" и т.д.
+        date_pattern = r'\s*\d{1,2}\s+(?:' + '|'.join(months) + r')\s*$'
+        cleaned_title = re.sub(date_pattern, '', cleaned_title).strip()
+        
+        # Убираем комбинации дата + время (например: "24 ноября 03:12")
+        datetime_pattern = r'\s*\d{1,2}\s+(?:' + '|'.join(months) + r')\s+\d{1,2}:\d{2}(?::\d{2})?\s*$'
+        cleaned_title = re.sub(datetime_pattern, '', cleaned_title).strip()
+        
+        return cleaned_title
+
+    def clean_all_titles_in_db(self):
+        """Очищает все заголовки в базе данных от времени и дат"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT id, title FROM news')
+        rows = cursor.fetchall()
+        
+        updated_count = 0
+        for row_id, title in rows:
+            cleaned_title = self.clean_title(title)
+            if cleaned_title != title:
+                cursor.execute('UPDATE news SET title = ? WHERE id = ?', (cleaned_title, row_id))
+                updated_count += 1
+        
+        conn.commit()
+        conn.close()
+        print(f"Очищено заголовков: {updated_count}")
+        return updated_count
         
     def get_page_content(self, url):
         """Получаем контент страницы"""
@@ -207,6 +252,9 @@ class SimpleSportboxScraper:
             title_elem = element.select_one('.title .text, .teaser-title, .news-title, .b-news-title, .title, .b-news-teaser-item__title')
             title = title_elem.get_text(strip=True) if title_elem else ""
             
+            # Очищаем заголовок от времени и дат сразу при извлечении
+            title = self.clean_title(title)
+            
             # Ссылка
             link_elem = element.find('a')
             link = link_elem.get('href') if link_elem else ""
@@ -253,6 +301,9 @@ class SimpleSportboxScraper:
         saved_count = 0
         for item in news_items:
             try:
+                # Убедимся, что заголовок очищен
+                item['title'] = self.clean_title(item['title'])
+                
                 cursor.execute('''
                     INSERT OR IGNORE INTO news 
                     (title, link, rubric, date, image_url, scraped_at, club_tags, league)
@@ -279,7 +330,7 @@ class SimpleSportboxScraper:
         print(f"Сохранено новых новостей в БД: {saved_count}")
         
     def get_news_from_db(self, limit: int = 100, club: str = None, league: str = None):
-        """Получает новости из базы данных"""
+        """Получает новости из базы данных с очищенными заголовками"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -304,6 +355,8 @@ class SimpleSportboxScraper:
         
         for row in cursor.fetchall():
             news_item = dict(zip(columns, row))
+            # Очищаем заголовок от времени и дат (на всякий случай)
+            news_item['title'] = self.clean_title(news_item['title'])
             news_items.append(news_item)
         
         conn.close()
@@ -420,6 +473,10 @@ class SimpleSportboxScraper:
         if filename_suffix:
             filename_suffix = f"_{filename_suffix}"
         
+        # Очищаем заголовки перед сохранением в файлы
+        for item in data:
+            item['title'] = self.clean_title(item['title'])
+        
         # JSON
         json_filename = f'sportbox_news/sportbox_{timestamp}{filename_suffix}.json'
         with open(json_filename, 'w', encoding='utf-8') as f:
@@ -452,6 +509,12 @@ class SimpleSportboxScraper:
 
 def main():
     scraper = SimpleSportboxScraper()
+    
+    # Очищаем существующие заголовки в базе данных
+    print("Очищаем заголовки от времени и дат...")
+    cleaned_count = scraper.clean_all_titles_in_db()
+    if cleaned_count > 0:
+        print(f"Очищено {cleaned_count} заголовков")
     
     print("Выберите опцию:")
     print("1 - Парсить все лиги")
