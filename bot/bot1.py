@@ -258,14 +258,24 @@ class FootballNewsBot:
             )
             return
         
-        # Сохраняем имя игрока для использования в callback
-        context.user_data['player_search'] = player_name
+        # Показываем сообщение о поиске
+        search_msg = await update.message.reply_text(f"🔍 Ищу новости по игроку '{player_name}'...")
         
-        # Ищем новости по игроку
+        # Ищем новости по игроку - ТОЛЬКО В ЗАГОЛОВКЕ
         news_items = self.get_news_from_db(limit=50, player=player_name)
         
+        # Удаляем сообщение о поиске
+        await search_msg.delete()
+        
         if not news_items:
-            text = f"❌ Новости по игроку '{player_name}' не найдены. Попробуйте другое имя."
+            text = (
+                f"❌ Новости по игроку '{player_name}' не найдены.\n\n"
+                f"Попробуйте:\n"
+                f"• Проверить написание имени\n"
+                f"• Использовать фамилию\n"
+                f"• Попробовать другого игрока\n"
+                f"• Выбрать из популярных игроков"
+            )
             keyboard = [
                 [InlineKeyboardButton("🔙 К списку игроков", callback_data="search_players")],
                 [InlineKeyboardButton("✏️ Ввести другое имя", callback_data="manual_player_search")]
@@ -427,7 +437,7 @@ class FootballNewsBot:
             keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            if hasattr(update, 'callback_query'):
+            if hasattr(update, 'callback_query') and update.callback_query:
                 query = update.callback_query
                 await query.edit_message_text(text, reply_markup=reply_markup)
             else:
@@ -446,7 +456,7 @@ class FootballNewsBot:
         news_items = context.user_data.get('news_items', [])
         
         if not news_items or index >= len(news_items):
-            if hasattr(update, 'callback_query'):
+            if hasattr(update, 'callback_query') and update.callback_query:
                 await update.callback_query.answer("Новости закончились! 🏁", show_alert=True)
             else:
                 await update.message.reply_text("Новости закончились! 🏁")
@@ -498,7 +508,7 @@ class FootballNewsBot:
             text += f"\n🔍 <i>Найдено по поиску: '{player}'</i>\n"
         
         if news_item.get('link'):
-            text += f"\n🔗 <a href='{news_item['link']}'>Читать на Sportbox</a>"
+            text += f"\n🔗 <a href='{news_item['link']}'>Читать на сайте</a>"
         
         # Создаем клавиатуру
         keyboard = []
@@ -563,7 +573,7 @@ class FootballNewsBot:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Отправляем или редактируем сообщение
-        if hasattr(update, 'callback_query'):
+        if hasattr(update, 'callback_query') and update.callback_query:
             query = update.callback_query
             
             # Редактируем существующее сообщение
@@ -889,12 +899,15 @@ class FootballNewsBot:
             params.append(league)
             
         if player:
-            # Ищем только в заголовке, так как поле content отсутствует в текущем парсере
+            # ИЩЕМ ТОЛЬКО В ЗАГОЛОВКЕ, так как поля content нет
             query += ' AND title LIKE ?'
             params.append(f'%{player}%')
             
         query += ' ORDER BY created_at DESC LIMIT ?'
         params.append(limit)
+        
+        # Отладочная информация
+        logger.info(f"Поиск новостей: player='{player}', запрос: {query}")
         
         cursor.execute(query, params)
         
@@ -905,6 +918,7 @@ class FootballNewsBot:
             news_item = dict(zip(columns, row))
             news_items.append(news_item)
         
+        logger.info(f"Найдено новостей: {len(news_items)}")
         conn.close()
         return news_items
     
@@ -957,6 +971,32 @@ class FootballNewsBot:
         conn.close()
         return count
     
+    def check_database_structure(self):
+        """Проверяет структуру базы данных для отладки"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Проверяем таблицы
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        print("Таблицы в базе:", tables)
+        
+        # Проверяем структуру таблицы news
+        cursor.execute("PRAGMA table_info(news)")
+        columns = cursor.fetchall()
+        print("Структура таблицы news:")
+        for col in columns:
+            print(f"  {col[1]} ({col[2]})")
+        
+        # Показываем примеры данных (только существующие колонки)
+        cursor.execute("SELECT * FROM news LIMIT 3")
+        samples = cursor.fetchall()
+        print("Примеры новостей (первые 3 записи):")
+        for i, sample in enumerate(samples, 1):
+            print(f"  {i}. {sample}")
+        
+        conn.close()
+    
     def run(self):
         """Запускает бота"""
         print("Бот запущен...")
@@ -969,6 +1009,12 @@ class FootballNewsBot:
         print("/favorites - Избранное")
         print("/stats - Статистика")
         print(f"\nПопулярные игроки для поиска: {', '.join(self.popular_players)}")
+        
+        # Проверяем структуру базы данных при запуске
+        print("\n=== ПРОВЕРКА СТРУКТУРЫ БАЗЫ ДАННЫХ ===")
+        self.check_database_structure()
+        print("=== КОНЕЦ ПРОВЕРКИ ===\n")
+        
         self.application.run_polling()
 
 # Функция для запуска бота
