@@ -37,7 +37,9 @@ class FootballNewsBot:
         self.application.add_handler(CommandHandler("stats", self.show_stats))
         self.application.add_handler(CommandHandler("favorites", self.show_favorites))
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_player_search))
+        
+        # Обработчики для текстового ввода - и для игроков, и для клубов
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_search))
         
     def init_favorites_db(self):
         """Инициализирует таблицу для хранения избранного"""
@@ -182,6 +184,7 @@ class FootballNewsBot:
         
         # Добавляем кнопки управления
         keyboard.append([InlineKeyboardButton("⭐ Мои клубы", callback_data="favorite_clubs")])
+        keyboard.append([InlineKeyboardButton("✏️ Ввести клуб вручную", callback_data="manual_club_search")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="show_news_categories")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -247,9 +250,52 @@ class FootballNewsBot:
         
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
     
-    async def handle_player_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def show_manual_club_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает интерфейс ручного ввода названия клуба"""
+        text = (
+            "⚽ <b>Поиск по клубам - ручной ввод</b>\n\n"
+            "Введите название клуба для поиска:\n"
+            "• Можно вводить полное название или аббревиатуру\n"
+            "• Например: <i>Реал Мадрид</i>, <i>Барселона</i>, <i>Челси</i>\n"
+            "• Поиск работает по тегам клубов в новостях\n\n"
+            "💡 <i>Совет:</i> Используйте полное название для более точного поиска"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("⭐ Мои клубы", callback_data="favorite_clubs")],
+            [InlineKeyboardButton("🔙 К списку клубов", callback_data="show_clubs")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    
+    async def handle_text_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает текстовый поиск - как по игрокам, так и по клубам"""
+        search_text = update.message.text.strip()
+        
+        if len(search_text) < 2:
+            await update.message.reply_text(
+                "❌ Слишком короткий запрос. Введите минимум 2 символа.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 К списку игроков", callback_data="search_players")],
+                    [InlineKeyboardButton("🔙 К списку клубов", callback_data="show_clubs")]
+                ])
+            )
+            return
+        
+        # Определяем тип поиска: проверяем, есть ли такой клуб в базе
+        all_clubs = self.get_all_clubs()
+        is_club_search = any(search_text.lower() in club.lower() for club in all_clubs)
+        
+        if is_club_search:
+            await self.handle_club_search(update, context, search_text)
+        else:
+            await self.handle_player_search(update, context, search_text)
+    
+    async def handle_player_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE, player_name: str = None):
         """Обрабатывает поиск по игрокам"""
-        player_name = update.message.text.strip()
+        if player_name is None:
+            player_name = update.message.text.strip()
         
         if len(player_name) < 2:
             await update.message.reply_text(
@@ -289,6 +335,53 @@ class FootballNewsBot:
         context.user_data['current_news_index'] = 0
         context.user_data['current_player'] = player_name
         context.user_data['news_type'] = "player_search"
+        
+        # Показываем первую новость
+        await self.display_news(update, context, 0)
+    
+    async def handle_club_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE, club_name: str = None):
+        """Обрабатывает поиск по клубам"""
+        if club_name is None:
+            club_name = update.message.text.strip()
+        
+        if len(club_name) < 2:
+            await update.message.reply_text(
+                "❌ Слишком короткий запрос. Введите минимум 2 символа.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К списку клубов", callback_data="show_clubs")]])
+            )
+            return
+        
+        # Показываем сообщение о поиске
+        search_msg = await update.message.reply_text(f"🔍 Ищу новости по клубу '{club_name}'...")
+        
+        # Ищем новости по клубу
+        news_items = self.get_news_from_db(limit=50, club=club_name)
+        
+        # Удаляем сообщение о поиске
+        await search_msg.delete()
+        
+        if not news_items:
+            text = (
+                f"❌ Новости по клубу '{club_name}' не найдены.\n\n"
+                f"Попробуйте:\n"
+                f"• Проверить написание названия\n"
+                f"• Использовать полное название\n"
+                f"• Попробовать другой клуб\n"
+                f"• Выбрать из списка клубов"
+            )
+            keyboard = [
+                [InlineKeyboardButton("🔙 К списку клубов", callback_data="show_clubs")],
+                [InlineKeyboardButton("✏️ Ввести другой клуб", callback_data="manual_club_search")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(text, reply_markup=reply_markup)
+            return
+        
+        # Сохраняем новости в контексте пользователя
+        context.user_data['news_items'] = news_items
+        context.user_data['current_news_index'] = 0
+        context.user_data['current_club'] = club_name
+        context.user_data['news_type'] = "club_search"
         
         # Показываем первую новость
         await self.display_news(update, context, 0)
@@ -507,6 +600,17 @@ class FootballNewsBot:
             # Добавляем информацию о поиске
             text += f"\n🔍 <i>Найдено по поиску: '{player}'</i>\n"
         
+        # Подсвечиваем название клуба в тегах, если есть поиск по клубу
+        elif club:
+            # Находим упоминания клуба в тегах (регистронезависимо)
+            if news_item.get('club_tags'):
+                pattern = re.compile(re.escape(club), re.IGNORECASE)
+                highlighted_clubs = pattern.sub(f"<b>{club}</b>", news_item['club_tags'])
+                text = text.replace(news_item['club_tags'], highlighted_clubs)
+            
+            # Добавляем информацию о поиске
+            text += f"\n🔍 <i>Найдено по поиску: '{club}'</i>\n"
+        
         if news_item.get('link'):
             text += f"\n🔗 <a href='{news_item['link']}'>Читать на сайте</a>"
         
@@ -673,6 +777,9 @@ class FootballNewsBot:
         
         elif data == "manual_player_search":
             await self.show_manual_player_search(update, context)
+        
+        elif data == "manual_club_search":
+            await self.show_manual_club_search(update, context)
         
         elif data == "show_favorites":
             await self.show_favorites(update, context)
@@ -907,7 +1014,7 @@ class FootballNewsBot:
         params.append(limit)
         
         # Отладочная информация
-        logger.info(f"Поиск новостей: player='{player}', запрос: {query}")
+        logger.info(f"Поиск новостей: club='{club}', player='{player}', запрос: {query}")
         
         cursor.execute(query, params)
         
@@ -1009,6 +1116,7 @@ class FootballNewsBot:
         print("/favorites - Избранное")
         print("/stats - Статистика")
         print(f"\nПопулярные игроки для поиска: {', '.join(self.popular_players)}")
+        print("\n🔍 Теперь можно искать новости по клубам и игрокам с клавиатуры!")
         
         # Проверяем структуру базы данных при запуске
         print("\n=== ПРОВЕРКА СТРУКТУРЫ БАЗЫ ДАННЫХ ===")
